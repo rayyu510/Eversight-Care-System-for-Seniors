@@ -1,0 +1,64 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ES2020", // This fixes the import.meta error
+    "lib": [
+      "ES2020",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "moduleResolution": "node",
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": false,
+    "noImplicitAny": false, // Temporarily to reduce type errors,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": false,
+    "jsx": "react-jsx",
+    "declaration": true,
+    "outDir": "./dist",
+    "baseUrl": "./src",
+    "paths": {
+      "@core/*": [
+        "./core-foundation/*"
+      ],
+      "@core/services": [
+        "./core-foundation/services/index"
+      ],
+      "@core/types": [
+        "./core-foundation/types/index"
+      ],
+      "@data/*": [
+        "./database/*"
+      ],
+      "@data/database": [
+        "./database/index"
+      ],
+      "@guardian-protect/*": [
+        "./guardian-protect/*"
+      ],
+      "@components/*": [
+        "./components/*"
+      ],
+      "@utils/*": [
+        "./utils/*"
+      ],
+      "@assets/*": [
+        "../assets/*"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*",
+    "tests/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "build"
+  ]
+}

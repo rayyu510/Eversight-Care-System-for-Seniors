@@ -1,0 +1,4510 @@
+// src/guardian-protect/hooks/useVideoFeeds.ts
+import { useState, useEffect } from 'react';
+import { VideoFeed } from '../types';
+import { VideoStreamService } from '../services/video-stream';
+
+export const useVideoFeeds = () => {
+    const [activeFeeds, setActiveFeeds] = useState<VideoFeed[]>([]);
+    const [feedQuality, setFeedQuality] = useState<Record<string, string>>({});
+    const [isRecording, setIsRecording] = useState<Record<string, boolean>>({});
+    const [streamService] = useState(() => new VideoStreamService());
+
+    useEffect(() => {
+        initializeFeeds();
+
+        return () => {
+            // Cleanup streams on unmount
+            activeFeeds.forEach(feed => {
+                streamService.stopStream(feed.cameraId);
+            });
+        };
+    }, []);
+
+    const initializeFeeds = async () => {
+        try {
+            // Get available cameras and start their feeds
+            const cameras = await getAvailableCameras();
+            const feeds: VideoFeed[] = [];
+            const qualities: Record<string, string> = {};
+            const recordings: Record<string, boolean> = {};
+
+            for (const camera of cameras) {
+                try {
+                    const feed = await streamService.startStream(camera.id, camera.streamUrl);
+                    feeds.push(feed);
+                    qualities[camera.id] = 'medium';
+                    recordings[camera.id] = false;
+                } catch (error) {
+                    console.error(`Failed to start feed for camera ${camera.id}:`, error);
+                }
+            }
+
+            setActiveFeeds(feeds);
+            setFeedQuality(qualities);
+            setIsRecording(recordings);
+        } catch (error) {
+            console.error('Failed to initialize video feeds:', error);
+        }
+    };
+
+    const switchCamera = async (oldCameraId: string, newCameraId: string) => {
+        try {
+            await streamService.stopStream(oldCameraId);
+
+            const newCamera = await getCameraInfo(newCameraId);
+            const newFeed = await streamService.startStream(newCameraId, newCamera.streamUrl);
+
+            setActiveFeeds(prev =>
+                prev.map(feed =>
+                    feed.cameraId === oldCameraId ? newFeed : feed
+                )
+            );
+
+            setFeedQuality(prev => ({
+                ...prev,
+                [newCameraId]: prev[oldCameraId] || 'medium'
+            }));
+
+            setIsRecording(prev => ({
+                ...prev,
+                [newCameraId]: false
+            }));
+        } catch (error) {
+            console.error('Failed to switch camera:', error);
+        }
+    };
+
+    const adjustQuality = async (cameraId: string, quality: string) => {
+        try {
+            await streamService.adjustQuality(cameraId, quality);
+            setFeedQuality(prev => ({
+                ...prev,
+                [cameraId]: quality
+            }));
+        } catch (error) {
+            console.error('Failed to adjust quality:', error);
+        }
+    };
+
+    const startRecording = async (cameraId: string) => {
+        try {
+            await streamService.startRecording(cameraId);
+            setIsRecording(prev => ({
+                ...prev,
+                [cameraId]: true
+            }));
+        } catch (error) {
+            console.error('Failed to start recording:', error);
+        }
+    };
+
+    const stopRecording = async (cameraId: string) => {
+        try {
+            const recordingUrl = await streamService.stopRecording(cameraId);
+            setIsRecording(prev => ({
+                ...prev,
+                [cameraId]: false
+            }));
+            return recordingUrl;
+        } catch (error) {
+            console.error('Failed to stop recording:', error);
+            return null;
+        }
+    };
+
+    // Helper functions
+    const getAvailableCameras = async () => {
+        // Mock camera data - in real implementation, this would come from API
+        return [
+            { id: 'cam_101', streamUrl: 'rtmp://camera-server/room_101', name: 'Room 101' },
+            { id: 'cam_102', streamUrl: 'rtmp://camera-server/room_102', name: 'Room 102' },
+            { id: 'cam_lobby', streamUrl: 'rtmp://camera-server/lobby', name: 'Main Lobby' },
+            { id: 'cam_dining', streamUrl: 'rtmp://camera-server/dining', name: 'Dining Room' }
+        ];
+    };
+
+    const getCameraInfo = async (cameraId: string) => {
+        // Mock implementation
+        return {
+            id: cameraId,
+            streamUrl: `rtmp://camera-server/${cameraId}`,
+            name: `Camera ${cameraId}`
+        };
+    };
+
+    return {
+        activeFeeds,
+        feedQuality,
+        isRecording,
+        switchCamera,
+        adjustQuality,
+        startRecording,
+        stopRecording,
+        refreshFeeds: initializeFeeds
+    };
+};
+
+// src/guardian-protect/hooks/useFallDetection.ts
+import { useState, useEffect } from 'react';
+import { FallDetectionEvent, HeatMapData, HeatMapZone } from '../types';
+import { FallDetectionService } from '../services/fall-detection';
+import { useEventBus } from '@eversight/core-foundation/hooks';
+
+export const useFallDetection = () => {
+    const [fallEvents, setFallEvents] = useState<FallDetectionEvent[]>([]);
+    const [heatMapData, setHeatMapData] = useState<HeatMapData[]>([]);
+    const [riskZones, setRiskZones] = useState<HeatMapZone[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [detectionService] = useState(() => new FallDetectionService(useEventBus()));
+
+    const { on, off } = useEventBus();
+
+    useEffect(() => {
+        initializeFallDetection();
+
+        // Listen for new fall events
+        on('guardian.fall.detected', handleNewFallEvent);
+        on('guardian.alert.acknowledged', handleAlertUpdate);
+        on('guardian.alert.resolved', handleAlertUpdate);
+
+        return () => {
+            off('guardian.fall.detected', handleNewFallEvent);
+            off('guardian.alert.acknowledged', handleAlertUpdate);
+            off('guardian.alert.resolved', handleAlertUpdate);
+        };
+    }, []);
+
+    const initializeFallDetection = async () => {
+        setIsLoading(true);
+        try {
+            // Load existing fall events
+            const events = await loadFallEvents();
+            setFallEvents(events);
+
+            // Load heat map data
+            const heatMaps = await loadHeatMapData();
+            setHeatMapData(heatMaps);
+
+            // Generate current risk zones
+            const zones = await generateRiskZones();
+            setRiskZones(zones);
+        } catch (error) {
+            console.error('Failed to initialize fall detection:', error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleNewFallEvent = (event: any) => {
+        const fallEvent = event.payload as FallDetectionEvent;
+        setFallEvents(prev => [fallEvent, ...prev]);
+
+        // Update risk zones if it's a new area
+        updateRiskZones(fallEvent);
+    };
+
+    const handleAlertUpdate = (event: any) => {
+        const { eventId } = event.payload;
+        setFallEvents(prev =>
+            prev.map(e =>
+                e.id === eventId
+                    ? { ...e, status: event.type.includes('acknowledged') ? 'acknowledged' : 'resolved' }
+                    : e
+            )
+        );
+    };
+
+    const acknowledgeAlert = async (eventId: string) => {
+        try {
+            await detectionService.acknowledgeAlert(eventId);
+        } catch (error) {
+            console.error('Failed to acknowledge alert:', error);
+            throw error;
+        }
+    };
+
+    const resolveAlert = async (eventId: string) => {
+        try {
+            await detectionService.resolveAlert(eventId);
+        } catch (error) {
+            console.error('Failed to resolve alert:', error);
+            throw error;
+        }
+    };
+
+    const markFalsePositive = async (eventId: string) => {
+        try {
+            await detectionService.markFalsePositive(eventId);
+        } catch (error) {
+            console.error('Failed to mark false positive:', error);
+            throw error;
+        }
+    };
+
+    const escalateAlert = async (eventId: string) => {
+        try {
+            // Implementation for escalating alert
+            const event = fallEvents.find(e => e.id === eventId);
+            if (event) {
+                const escalatedEvent = {
+                    ...event,
+                    severity: escalateSeverity(event.severity)
+                };
+
+                setFallEvents(prev =>
+                    prev.map(e => e.id === eventId ? escalatedEvent : e)
+                );
+            }
+        } catch (error) {
+            console.error('Failed to escalate alert:', error);
+            throw error;
+        }
+    };
+
+    const getZoneRecommendations = (zoneId: string): string[] => {
+        const zone = riskZones.find(z => z.id === zoneId);
+        return zone?.recommendedActions || [];
+    };
+
+    const getZoneHistory = async (zoneId: string) => {
+        // Implementation to get historical data for a zone
+        return fallEvents.filter(event =>
+            // Logic to determine if event occurred in this zone
+            true // Placeholder
+        );
+    };
+
+    // Helper functions
+    const loadFallEvents = async (): Promise<FallDetectionEvent[]> => {
+        // Mock data - in real implementation, load from database
+        return [
+            {
+                id: 'fall_001',
+                cameraId: 'cam_101',
+                roomId: 'room_101',
+                residentId: 'resident_001',
+                timestamp: new Date(Date.now() - 1000 * 60 * 30), // 30 minutes ago
+                confidence: 0.92,
+                coordinates: { x: 150, y: 200 },
+                severity: 'high',
+                status: 'acknowledged',
+                responseTime: 120,
+                videoClipUrl: 'video_clips/fall_001.mp4'
+            },
+            {
+                id: 'fall_002',
+                cameraId: 'cam_lobby',
+                timestamp: new Date(Date.now() - 1000 * 60 * 60), // 1 hour ago
+                confidence: 0.87,
+                coordinates: { x: 400, y: 100 },
+                severity: 'medium',
+                status: 'resolved',
+                responseTime: 180,
+                videoClipUrl: 'video_clips/fall_002.mp4'
+            }
+        ];
+    };
+
+    const loadHeatMapData = async (): Promise<HeatMapData[]> => {
+        // Mock heat map data
+        return [
+            {
+                floor: 1,
+                timestamp: new Date(),
+                aggregationPeriod: 'day',
+                zones: [
+                    {
+                        id: 'zone_001',
+                        coordinates: { x: 100, y: 150, width: 200, height: 100 },
+                        riskLevel: 75,
+                        incidentCount: 3,
+                        category: 'fall_risk',
+                        recommendedActions: [
+                            'Install additional handrails',
+                            'Improve lighting',
+                            'Add anti-slip flooring'
+                        ]
+                    },
+                    {
+                        id: 'zone_002',
+                        coordinates: { x: 350, y: 50, width: 150, height: 100 },
+                        riskLevel: 45,
+                        incidentCount: 1,
+                        category: 'high_traffic',
+                        recommendedActions: [
+                            'Monitor during peak hours',
+                            'Consider crowd control measures'
+                        ]
+                    }
+                ]
+            }
+        ];
+    };
+
+    const generateRiskZones = async (): Promise<HeatMapZone[]> => {
+        // Generate risk zones based on recent events
+        const recentEvents = fallEvents.filter(event =>
+            Date.now() - event.timestamp.getTime() < 24 * 60 * 60 * 1000 // Last 24 hours
+        );
+
+        // Group events by location and calculate risk
+        const zoneMap = new Map<string, HeatMapZone>();
+
+        recentEvents.forEach(event => {
+            const zoneKey = `${event.roomId || 'common'}_${Math.floor(event.coordinates.x / 100)}_${Math.floor(event.coordinates.y / 100)}`;
+
+            if (!zoneMap.has(zoneKey)) {
+                zoneMap.set(zoneKey, {
+                    id: zoneKey,
+                    coordinates: {
+                        x: Math.floor(event.coordinates.x / 100) * 100,
+                        y: Math.floor(event.coordinates.y / 100) * 100,
+                        width: 100,
+                        height: 100
+                    },
+                    riskLevel: 0,
+                    incidentCount: 0,
+                    category: 'fall_risk',
+                    recommendedActions: []
+                });
+            }
+
+            const zone = zoneMap.get(zoneKey)!;
+            zone.incidentCount++;
+            zone.riskLevel = Math.min(100, zone.riskLevel + (event.severity === 'critical' ? 30 :
+                event.severity === 'high' ? 20 :
+                    event.severity === 'medium' ? 10 : 5));
+        });
+
+        return Array.from(zoneMap.values());
+    };
+
+    const updateRiskZones = (newEvent: FallDetectionEvent) => {
+        setRiskZones(prev => {
+            const updated = [...prev];
+            const zoneKey = `${newEvent.roomId || 'common'}_${Math.floor(newEvent.coordinates.x / 100)}_${Math.floor(newEvent.coordinates.y / 100)}`;
+
+            const existingZone = updated.find(z => z.id === zoneKey);
+            if (existingZone) {
+                existingZone.incidentCount++;
+                existingZone.riskLevel = Math.min(100, existingZone.riskLevel +
+                    (newEvent.severity === 'critical' ? 30 :
+                        newEvent.severity === 'high' ? 20 :
+                            newEvent.severity === 'medium' ? 10 : 5));
+            } else {
+                updated.push({
+                    id: zoneKey,
+                    coordinates: {
+                        x: Math.floor(newEvent.coordinates.x / 100) * 100,
+                        y: Math.floor(newEvent.coordinates.y / 100) * 100,
+                        width: 100,
+                        height: 100
+                    },
+                    riskLevel: newEvent.severity === 'critical' ? 30 :
+                        newEvent.severity === 'high' ? 20 :
+                            newEvent.severity === 'medium' ? 10 : 5,
+                    incidentCount: 1,
+                    category: 'fall_risk',
+                    recommendedActions: generateRecommendations(newEvent)
+                });
+            }
+
+            return updated;
+        });
+    };
+
+    const escalateSeverity = (currentSeverity: string): 'low' | 'medium' | 'high' | 'critical' => {
+        switch (currentSeverity) {
+            case 'low': return 'medium';
+            case 'medium': return 'high';
+            case 'high': return 'critical';
+            default: return 'critical';
+        }
+    };
+
+    const generateRecommendations = (event: FallDetectionEvent): string[] => {
+        const recommendations = [];
+
+        if (event.severity === 'critical' || event.severity === 'high') {
+            recommendations.push('Immediate safety assessment required');
+            recommendations.push('Consider additional monitoring');
+        }
+
+        if (event.roomId) {
+            recommendations.push('Review room safety features');
+            recommendations.push('Check for trip hazards');
+        } else {
+            recommendations.push('Assess common area traffic flow');
+            recommendations.push('Review lighting conditions');
+        }
+
+        return recommendations;
+    };
+
+    return {
+        fallEvents,
+        heatMapData,
+        riskZones,
+        isLoading,
+        acknowledgeAlert,
+        resolveAlert,
+        markFalsePositive,
+        escalateAlert,
+        getZoneRecommendations,
+        getZoneHistory,
+        refreshData: initializeFallDetection
+    };
+};
+
+// src/guardian-protect/hooks/useEmergencyResponse.ts
+import { useState, useEffect } from 'react';
+import { EmergencyResponse } from '../types';
+import { EmergencyResponseService } from '../services/emergency-response';
+import { useEventBus } from '@eversight/core-foundation/hooks';
+
+export const useEmergencyResponse = () => {
+    const [activeResponses, setActiveResponses] = useState<EmergencyResponse[]>([]);
+    const [responseHistory, setResponseHistory] = useState<EmergencyResponse[]>([]);
+    const [responseTeams, setResponseTeams] = useState<any[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [responseService] = useState(() => new EmergencyResponseService(useEventBus()));
+
+    const { on, off } = useEventBus();
+
+    useEffect(() => {
+        initializeEmergencyResponse();
+
+        // Listen for emergency events
+        on('emergency.response.initiated', handleResponseInitiated);
+        on('emergency.response.status_updated', handleStatusUpdate);
+        on('emergency.response.escalated', handleResponseEscalated);
+
+        return () => {
+            off('emergency.response.initiated', handleResponseInitiated);
+            off('emergency.response.status_updated', handleStatusUpdate);
+            off('emergency.response.escalated', handleResponseEscalated);
+        };
+    }, []);
+
+    const initializeEmergencyResponse = async () => {
+        setIsLoading(true);
+        try {
+            const active = responseService.getActiveResponses();
+            const history = responseService.getResponseHistory();
+            const teams = responseService.getResponseTeams();
+
+            setActiveResponses(active);
+            setResponseHistory(history);
+            setResponseTeams(teams);
+        } catch (error) {
+            console.error('Failed to initialize emergency response:', error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleResponseInitiated = (event: any) => {
+        const response = event.payload as EmergencyResponse;
+        setActiveResponses(prev => [response, ...prev]);
+    };
+
+    const handleStatusUpdate = (event: any) => {
+        const { responseId, response } = event.payload;
+        setActiveResponses(prev =>
+            prev.map(r => r.id === responseId ? response : r)
+        );
+
+        if (response.status === 'resolved') {
+            setResponseHistory(prev => [response, ...prev]);
+            setActiveResponses(prev => prev.filter(r => r.id !== responseId));
+        }
+    };
+
+    const handleResponseEscalated = (event: any) => {
+        const { responseId, escalationLevel } = event.payload;
+        setActiveResponses(prev =>
+            prev.map(r =>
+                r.id === responseId
+                    ? { ...r, escalationLevel }
+                    : r
+            )
+        );
+    };
+
+    const coordinateResponse = async (responseId: string, coordination: any) => {
+        try {
+            await responseService.coordinateResponse(responseId, coordination);
+        } catch (error) {
+            console.error('Failed to coordinate response:', error);
+            throw error;
+        }
+    };
+
+    const updateResponseStatus = async (responseId: string, status: string) => {
+        try {
+            await responseService.updateResponseStatus(responseId, status);
+        } catch (error) {
+            console.error('Failed to update response status:', error);
+            throw error;
+        }
+    };
+
+    const assignResponder = async (responseId: string, responderId: string) => {
+        try {
+            await responseService.assignResponder(responseId, responderId);
+        } catch (error) {
+            console.error('Failed to assign responder:', error);
+            throw error;
+        }
+    };
+
+    const escalateResponse = async (responseId: string) => {
+        try {
+            await responseService.escalateResponse(responseId);
+        } catch (error) {
+            console.error('Failed to escalate response:', error);
+            throw error;
+        }
+    };
+
+    const closeResponse = async (responseId: string) => {
+        try {
+            await responseService.updateResponseStatus(responseId, 'resolved');
+        } catch (error) {
+            console.error('Failed to close response:', error);
+            throw error;
+        }
+    };
+
+    return {
+        activeResponses,
+        responseHistory,
+        responseTeams,
+        isLoading,
+        coordinateResponse,
+        updateResponseStatus,
+        assignResponder,
+        escalateResponse,
+        closeResponse,
+        refreshData: initializeEmergencyResponse
+    };
+};
+
+// src/guardian-protect/workers/video-processor.worker.ts
+// Video processing worker for fall detection
+self.onmessage = function (event) {
+    const { type, config, frameData } = event.data;
+
+    switch (type) {
+        case 'configure':
+            configureProcessor(config);
+            break;
+        case 'process_frame':
+            processFrame(frameData);
+            break;
+        case 'shutdown':
+            shutdown();
+            break;
+    }
+};
+
+let processorConfig: any = null;
+let frameBuffer: ImageData[] = [];
+let lastProcessTime = 0;
+
+function configureProcessor(config: any) {
+    processorConfig = config;
+
+    self.postMessage({
+        type: 'configured',
+        cameraId: config.cameraId
+    });
+}
+
+function processFrame(frameData: ImageData) {
+    if (!processorConfig) return;
+
+    const now = Date.now();
+    if (now - lastProcessTime < processorConfig.processingInterval) {
+        return; // Skip frame based on processing interval
+    }
+
+    // Add frame to buffer
+    frameBuffer.push(frameData);
+    if (frameBuffer.length > 10) {
+        frameBuffer.shift(); // Keep only last 10 frames
+    }
+
+    // Perform fall detection analysis
+    const detectionResult = analyzeFallDetection(frameData);
+
+    if (detectionResult.fallDetected && detectionResult.confidence >= processorConfig.confidenceThreshold) {
+        self.postMessage({
+            type: 'fall_detected',
+            cameraId: processorConfig.cameraId,
+            confidence: detectionResult.confidence,
+            coordinates: detectionResult.coordinates,
+            fallType: detectionResult.fallType,
+            impact: detectionResult.impact,
+            timestamp: now,
+            residentId: detectionResult.residentId
+        });
+    }
+
+    lastProcessTime = now;
+}
+
+function analyzeFallDetection(frameData: ImageData): any {
+    // Simplified fall detection algorithm
+    // In a real implementation, this would use computer vision libraries
+    // and machine learning models for accurate fall detection
+
+    const { width, height, data } = frameData;
+    const pixels = data;
+
+    // Basic motion detection by comparing with previous frames
+    if (frameBuffer.length < 2) {
+        return { fallDetected: false, confidence: 0 };
+    }
+
+    const previousFrame = frameBuffer[frameBuffer.length - 2];
+    const motionAreas = detectMotion(pixels, previousFrame.data, width, height);
+
+    // Analyze motion patterns for fall characteristics
+    const fallCharacteristics = analyzeFallPattern(motionAreas);
+
+    return {
+        fallDetected: fallCharacteristics.confidence > 0.5,
+        confidence: fallCharacteristics.confidence,
+        coordinates: fallCharacteristics.centerOfMotion,
+        fallType: fallCharacteristics.type,
+        impact: fallCharacteristics.impact,
+        residentId: fallCharacteristics.personId
+    };
+}
+
+function detectMotion(currentPixels: Uint8ClampedArray, previousPixels: Uint8ClampedArray, width: number, height: number): any[] {
+    const motionAreas = [];
+    const threshold = 30; // Motion detection threshold
+    const blockSize = 16; // Size of blocks to analyze
+
+    for (let y = 0; y < height - blockSize; y += blockSize) {
+        for (let x = 0; x < width - blockSize; x += blockSize) {
+            let motionLevel = 0;
+
+            // Compare block of pixels
+            for (let by = 0; by < blockSize; by++) {
+                for (let bx = 0; bx < blockSize; bx++) {
+                    const pixelIndex = ((y + by) * width + (x + bx)) * 4;
+
+                    const currentLuma = 0.299 * currentPixels[pixelIndex] +
+                        0.587 * currentPixels[pixelIndex + 1] +
+                        0.114 * currentPixels[pixelIndex + 2];
+
+                    const previousLuma = 0.299 * previousPixels[pixelIndex] +
+                        0.587 * previousPixels[pixelIndex + 1] +
+                        0.114 * previousPixels[pixelIndex + 2];
+
+                    const diff = Math.abs(currentLuma - previousLuma);
+                    if (diff > threshold) {
+                        motionLevel++;
+                    }
+                }
+            }
+
+            if (motionLevel > blockSize * blockSize * 0.3) { // 30% of block has motion
+                motionAreas.push({
+                    x,
+                    y,
+                    width: blockSize,
+                    height: blockSize,
+                    intensity: motionLevel / (blockSize * blockSize)
+                });
+            }
+        }
+    }
+
+    return motionAreas;
+}
+
+function analyzeFallPattern(motionAreas: any[]): any {
+    if (motionAreas.length === 0) {
+        return { confidence: 0, centerOfMotion: { x: 0, y: 0 }, type: 'none', impact: 'none' };
+    }
+
+    // Calculate center of motion
+    const totalMotion = motionAreas.reduce((sum, area) => sum + area.intensity, 0);
+    const centerX = motionAreas.reduce((sum, area) => sum + area.x * area.intensity, 0) / totalMotion;
+    const centerY = motionAreas.reduce((sum, area) => sum + area.y * area.intensity, 0) / totalMotion;
+
+    // Analyze motion characteristics for fall detection
+    const verticalMotion = motionAreas.filter(area => area.y > centerY).length;
+    const horizontalSpread = Math.max(...motionAreas.map(a => a.x)) - Math.min(...motionAreas.map(a => a.x));
+    const verticalSpread = Math.max(...motionAreas.map(a => a.y)) - Math.min(...motionAreas.map(a => a.y));
+
+    // Fall characteristics
+    const suddenVerticalMotion = verticalMotion > motionAreas.length * 0.7;
+    const significantSpread = horizontalSpread > 50 && verticalSpread > 50;
+    const highIntensity = totalMotion / motionAreas.length > 0.8;
+
+    let confidence = 0;
+    let fallType = 'none';
+    let impact = 'low';
+
+    if (suddenVerticalMotion) confidence += 0.4;
+    if (significantSpread) confidence += 0.3;
+    if (highIntensity) confidence += 0.3;
+
+    if (confidence > 0.7) {
+        fallType = suddenVerticalMotion ? 'vertical_fall' : 'slip';
+        impact = highIntensity ? 'high' : 'medium';
+    }
+
+    return {
+        confidence,
+        centerOfMotion: { x: centerX, y: centerY },
+        type: fallType,
+        impact,
+        personId: detectPersonId(motionAreas) // Simplified person identification
+    };
+}
+
+function detectPersonId(motionAreas: any[]): string | undefined {
+    // Simplified person identification based on motion patterns
+    // In a real implementation, this would use facial recognition or other identification methods
+
+    if (motionAreas.length > 5) {
+        // Assume person detected if significant motion
+        return `person_${Math.floor(Math.random() * 1000)}`;
+    }
+
+    return undefined;
+}
+
+function shutdown() {
+    frameBuffer = [];
+    processorConfig = null;
+    self.postMessage({ type: 'shutdown_complete' });
+}
+
+// src/guardian-protect/workers/alert-processor.worker.ts
+// Alert processing worker for handling emergency alerts
+self.onmessage = function (event) {
+    const { type, alertData } = event.data;
+
+    switch (type) {
+        case 'process_alert':
+            processAlert(alertData);
+            break;
+        case 'batch_process':
+            batchProcessAlerts(alertData);
+            break;
+    }
+};
+
+interface AlertData {
+    id: string;
+    type: string;
+    severity: string;
+    timestamp: Date;
+    location: any;
+    metadata: any;
+}
+
+function processAlert(alertData: AlertData) {
+    // Validate alert data
+    const validation = validateAlert(alertData);
+    if (!validation.isValid) {
+        self.postMessage({
+            type: 'alert_validation_failed',
+            alertId: alertData.id,
+            errors: validation.errors
+        });
+        return;
+    }
+
+    // Enrich alert with additional context
+    const enrichedAlert = enrichAlert(alertData);
+
+    // Determine response requirements
+    const responseRequirements = calculateResponseRequirements(enrichedAlert);
+
+    // Generate recommendations
+    const recommendations = generateRecommendations(enrichedAlert);
+
+    self.postMessage({
+        type: 'alert_processed',
+        alert: enrichedAlert,
+        responseRequirements,
+        recommendations
+    });
+}
+
+function batchProcessAlerts(alerts: AlertData[]) {
+    const processedAlerts = alerts.map(alert => {
+        const validation = validateAlert(alert);
+        if (validation.isValid) {
+            return {
+                alert: enrichAlert(alert),
+                responseRequirements: calculateResponseRequirements(alert),
+                recommendations: generateRecommendations(alert)
+            };
+        }
+        return null;
+    }).filter(Boolean);
+
+    self.postMessage({
+        type: 'batch_processed',
+        results: processedAlerts
+    });
+}
+
+function validateAlert(alert: AlertData): { isValid: boolean; errors: string[] } {
+    const errors = [];
+
+    if (!alert.id) errors.push('Alert ID is required');
+    if (!alert.type) errors.push('Alert type is required');
+    if (!alert.severity) errors.push('Alert severity is required');
+    if (!alert.timestamp) errors.push('Alert timestamp is required');
+    if (!alert.location) errors.push('Alert location is required');
+
+    return {
+        isValid: errors.length === 0,
+        errors
+    };
+}
+
+function calculateRiskScore(alert: AlertData): number {
+    let riskScore = 0;
+
+    // Base score by alert type
+    const typeScores = {
+        fall: 80,
+        medical: 90,
+        fire: 95,
+        security: 70,
+        natural_disaster: 85
+    };
+
+    riskScore = typeScores[alert.type as keyof typeof typeScores] || 50;
+
+    // Adjust by severity
+    const severityMultipliers = {
+        critical: 1.3,
+        high: 1.1,
+        medium: 1.0,
+        low: 0.8
+    };
+
+    riskScore *= severityMultipliers[alert.severity as keyof typeof severityMultipliers] || 1.0;
+
+    // Time-based adjustment (night hours are higher risk)
+    const hour = new Date(alert.timestamp).getHours();
+    if (hour >= 22 || hour <= 6) {
+        riskScore *= 1.2; // Night time multiplier
+    }
+
+    return Math.min(100, Math.round(riskScore));
+}
+
+function getHistoricalContext(alert: AlertData): any {
+    // Simplified historical context - in real implementation, query database
+    return {
+        recentSimilarAlerts: Math.floor(Math.random() * 5),
+        locationHistory: Math.floor(Math.random() * 10),
+        timePatterns: ['peak_hours', 'normal_activity'][Math.floor(Math.random() * 2)]
+    };
+}
+
+function getLocationContext(location: any): any {
+    return {
+        floorPlan: `floor_${location.floor}`,
+        nearbyAreas: ['dining_room', 'lobby', 'hallway'],
+        accessPoints: ['main_entrance', 'emergency_exit'],
+        specialConsiderations: location.floor === 2 ? ['stairs', 'elevator'] : ['ground_level']
+    };
+}
+
+function calculateResponseRequirements(alert: AlertData): any {
+    const requirements = {
+        immediateResponse: false,
+        responderTypes: [] as string[],
+        estimatedPersonnel: 1,
+        specialEquipment: [] as string[],
+        externalServices: [] as string[]
+    };
+
+    // Determine response based on alert type and severity
+    switch (alert.type) {
+        case 'fall':
+            requirements.responderTypes.push('nurse', 'aide');
+            if (alert.severity === 'critical' || alert.severity === 'high') {
+                requirements.immediateResponse = true;
+                requirements.estimatedPersonnel = 2;
+                requirements.specialEquipment.push('first_aid_kit', 'wheelchair');
+            }
+            break;
+
+        case 'medical':
+            requirements.immediateResponse = true;
+            requirements.responderTypes.push('nurse', 'doctor');
+            requirements.estimatedPersonnel = 2;
+            requirements.specialEquipment.push('aed', 'oxygen', 'first_aid_kit');
+            if (alert.severity === 'critical') {
+                requirements.externalServices.push('911', 'ambulance');
+                requirements.estimatedPersonnel = 3;
+            }
+            break;
+
+        case 'fire':
+            requirements.immediateResponse = true;
+            requirements.responderTypes.push('security', 'maintenance');
+            requirements.estimatedPersonnel = 3;
+            requirements.specialEquipment.push('fire_extinguisher');
+            requirements.externalServices.push('fire_department');
+            break;
+
+        case 'security':
+            requirements.responderTypes.push('security');
+            if (alert.severity === 'high' || alert.severity === 'critical') {
+                requirements.immediateResponse = true;
+                requirements.estimatedPersonnel = 2;
+                requirements.externalServices.push('police');
+            }
+            break;
+    }
+
+    return requirements;
+}
+
+function generateRecommendations(alert: AlertData): string[] {
+    const recommendations = [];
+
+    // General recommendations based on alert type
+    switch (alert.type) {
+        case 'fall':
+            recommendations.push('Assess for injuries before moving resident');
+            recommendations.push('Document incident details thoroughly');
+            recommendations.push('Review fall prevention measures');
+            if (alert.severity === 'critical') {
+                recommendations.push('Consider medical evaluation');
+            }
+            break;
+
+        case 'medical':
+            recommendations.push('Follow emergency medical protocols');
+            recommendations.push('Maintain airway, breathing, circulation');
+            recommendations.push('Gather medical history and medications');
+            recommendations.push('Prepare for potential transport');
+            break;
+
+        case 'fire':
+            recommendations.push('Activate fire alarm system');
+            recommendations.push('Begin evacuation procedures if necessary');
+            recommendations.push('Close doors to contain fire');
+            recommendations.push('Account for all residents and staff');
+            break;
+
+        case 'security':
+            recommendations.push('Secure the immediate area');
+            recommendations.push('Ensure resident and staff safety');
+            recommendations.push('Document security incident');
+            recommendations.push('Review security protocols');
+            break;
+    }
+
+    // Location-specific recommendations
+    if (alert.location.floor === 2) {
+        recommendations.push('Consider elevator vs. stairs for response');
+    }
+
+    if (alert.location.roomId) {
+        recommendations.push('Check room for additional hazards');
+    } else {
+        recommendations.push('Clear common area if needed');
+    }
+
+    // Time-specific recommendations
+    const hour = new Date(alert.timestamp).getHours();
+    if (hour >= 22 || hour <= 6) {
+        recommendations.push('Consider reduced staffing - may need additional support');
+        recommendations.push('Minimize disruption to sleeping residents');
+    }
+
+    return recommendations;
+}
+
+// Export the Guardian Protect module
+export default {
+    components: {
+        FloorPlanView,
+        VideoFeedGrid,
+        HeatMapOverlay,
+        AlertPanel,
+        ResponseDashboard
+    },
+    services: {
+        FallDetectionService,
+        VideoStreamService,
+        EmergencyResponseService
+    },
+    hooks: {
+        useFloorPlan,
+        useVideoFeeds,
+        useFallDetection,
+        useEmergencyResponse
+    },
+    types: {
+        // All types are exported from index.ts
+    }
+};
+
+// src/guardian-protect/README.md
+/*
+# Guardian Protect Module
+
+## Overview
+The Guardian Protect module provides comprehensive fall detection, video surveillance, and emergency response capabilities for the Eversight Care Desktop System. This module implements multi-floor monitoring with AI-powered fall detection and coordinated emergency response.
+
+## Key Features
+
+### Multi-Floor Monitoring
+- **Floor 1 (Ground Level)**: Rooms 101-130, common areas including main lobby, dining room, recreation room, library, kitchen, and service areas
+- **Floor 2 (Upper Level)**: Rooms 201-230, upper lounge, TV room, fitness center, game room, nurses station, and medical areas  
+- **Outdoor Areas**: Garden courtyard, walking paths, outdoor seating areas, emergency assembly points
+
+### Video Surveillance System
+- **60+ Camera Coverage**: Complete monitoring of all rooms, hallways, and common areas
+- **Multiple Camera Types**: Room monitors, wide-angle hallway cameras, overhead dining cameras, activity-focused cameras
+- **Video Wall Display**: Multi-screen command center for comprehensive monitoring
+- **Smart Camera Switching**: Automatic focus on areas with alerts or unusual activity
+- **Recording Capabilities**: Manual and automatic recording with clip generation for incidents
+
+### AI-Powered Fall Detection
+- **Advanced Detection**: Machine learning algorithms for accurate fall detection with configurable sensitivity
+- **Real-time Processing**: Sub-second detection and alert generation
+- **False Positive Reduction**: Continuous learning to minimize false alarms
+- **Confidence Scoring**: Risk assessment with confidence levels for each detection
+- **Behavioral Analysis**: Pattern recognition for wandering, distress, and unusual behavior
+
+### Heat Map Risk Analysis
+- **Risk Visualization**: Real-time heat maps showing fall risk zones across all floors
+- **Historical Analysis**: Trend analysis over time periods (hour, day, week, month)
+- **Zone-Based Insights**: Detailed risk assessment for specific areas with recommendations
+- **Predictive Analytics**: Identification of high-risk times and locations
+
+### Emergency Response Coordination
+- **Automated Response**: Immediate response team notification for critical events
+- **Response Tracking**: Real-time status updates and coordination
+- **Escalation Protocols**: Multi-level escalation for unresolved incidents
+- **Team Management**: Response team availability and assignment tracking
+
+## Architecture
+
+### Components
+- **FloorPlanView**: Interactive floor plan with real-time status indicators
+- **VideoFeedGrid**: Multi-camera video surveillance interface with recording controls
+- **HeatMapOverlay**: Risk visualization and analysis dashboard
+- **AlertPanel**: Real-time alert management and response coordination
+- **ResponseDashboard**: Emergency response team coordination interface
+
+### Services
+- **FallDetectionService**: Core AI-powered fall detection engine
+- **VideoStreamService**: Video feed management, recording, and quality control
+- **EmergencyResponseService**: Response coordination and team management
+
+### Background Workers
+- **VideoProcessorWorker**: Real-time video analysis for fall detection
+- **AlertProcessorWorker**: Alert validation, enrichment, and processing
+
+## Usage
+
+### Basic Integration
+```typescript
+import { FloorPlanView, AlertPanel } from '@eversight/guardian-protect';
+
+function MonitoringDashboard() {
+  const [selectedFloor, setSelectedFloor] = useState(1);
+  
+  return (
+    <div className="monitoring-layout">
+      <FloorPlanView
+        selectedFloor={selectedFloor}
+        onFloorChange={setSelectedFloor}
+        onRoomSelect={handleRoomSelect}
+        onCameraSelect={handleCameraSelect}
+      />
+      <AlertPanel
+        onAlertSelect={handleAlertSelect}
+        onResponseInitiate={handleResponseInitiate}
+      />
+    </div>
+  );
+}
+```
+
+### Advanced Video Monitoring
+```typescript
+import { VideoFeedGrid } from '@eversight/guardian-protect';
+
+function VideoMonitoring() {
+  const [selectedCameras, setSelectedCameras] = useState(['cam_101', 'cam_lobby']);
+  const [layout, setLayout] = useState<'2x2'>('2x2');
+  
+  return (
+    <VideoFeedGrid
+      selectedCameras={selectedCameras}
+      layout={layout}
+      onLayoutChange={setLayout}
+      onCameraSelect={handleCameraSelection}
+    />
+  );
+}
+```
+
+### Emergency Response Integration
+```typescript
+import { ResponseDashboard } from '@eversight/guardian-protect';
+import { useEmergencyResponse } from '@eversight/guardian-protect/hooks';
+
+function EmergencyManagement() {
+  const {
+    activeResponses,
+    updateResponseStatus,
+    assignResponder
+  } = useEmergencyResponse();
+  
+  return (
+    <ResponseDashboard
+      onResponseSelect={handleResponseSelect}
+    />
+  );
+}
+```
+
+## Configuration
+
+### Fall Detection Settings
+```typescript
+const fallDetectionConfig = {
+  confidenceThreshold: 0.7,        // Minimum confidence for alerts
+  sensitivity: 'high',             // Detection sensitivity level
+  processingInterval: 100,         // Processing interval in ms
+  enableNightMode: true,           // Enhanced detection during night hours
+  falsePositiveLearning: true      // Enable ML model improvement
+};
+```
+
+### Camera Configuration  
+```typescript
+const cameraConfig = {
+  defaultQuality: 'medium',        // Default stream quality
+  autoRecordOnAlert: true,         // Auto-record when alerts triggered
+  recordingDuration: 30,           // Recording duration in seconds
+  maxConcurrentStreams: 16,        // Maximum simultaneous streams
+  reconnectAttempts: 5             // Max reconnection attempts
+};
+```
+
+### Response Team Setup
+```typescript
+const responseTeamConfig = {
+  autoAssignment: true,            // Auto-assign available responders
+  escalationDelay: 300,            // Auto-escalation delay in seconds
+  requiredResponders: {            // Minimum responders by incident type
+    fall: { critical: 3, high: 2, medium: 1, low: 1 },
+    medical: { critical: 4, high: 3, medium: 2, low: 1 }
+  }
+};
+```
+
+## Performance Metrics
+
+### Target Performance
+- **Detection Latency**: <2 seconds from event to alert
+- **Video Stream Latency**: <500ms for live feeds
+- **Alert Processing**: <1 second for alert validation and routing
+- **Response Time**: <60 seconds for critical incidents
+- **System Uptime**: 99.9% availability
+
+### Resource Usage
+- **Memory**: <100MB per camera feed
+- **CPU**: <30% for video processing (per camera)
+- **Network**: Variable based on video quality and number of streams
+- **Storage**: Configurable retention for video recordings
+
+## Integration Points
+
+### Event System
+The module integrates with the core event system for real-time communication:
+
+```typescript
+// Fall detection events
+'guardian.fall.detected'
+'guardian.alert.acknowledged'
+'guardian.alert.resolved'
+
+// Emergency response events  
+'emergency.response.initiated'
+'emergency.response.status_updated'
+'emergency.response.escalated'
+```
+
+### Data Synchronization
+- Real-time sync with mobile devices
+- Cloud backup for critical alerts and video clips
+- Integration with external emergency services
+
+### Compliance & Security
+- HIPAA-compliant data handling
+- Encrypted video streams and storage
+- Audit logging for all system actions
+- Role-based access control integration
+
+## Future Enhancements
+
+### Planned Features
+- Voice command integration for hands-free operation
+- Wearable device integration for resident monitoring
+- Advanced AI for behavior prediction and early intervention
+- Integration with smart building systems (lighting, HVAC, locks)
+- Mobile app for family notifications and updates
+
+### Scalability Improvements
+- Support for multiple facility locations
+- Cloud-based AI processing for enhanced detection
+- Integration with external camera systems
+- Advanced analytics and reporting dashboard
+
+## Support and Maintenance
+
+### Monitoring
+- Built-in system health monitoring
+- Performance metrics dashboard
+- Automated error reporting and recovery
+- Regular system health checks
+
+### Updates
+- Over-the-air updates for AI models
+- Configuration management and backup
+- Version control for all system components
+- Rollback capabilities for failed updates
+
+For technical support or feature requests, please contact the Eversight Care development team.
+*/// src/guardian-protect/hooks/useVideoFeeds.ts
+import { useState, useEffect } from 'react';
+import { VideoFeed } from '../types';
+import { VideoStreamService } from '../services/video-stream';
+
+export const useVideoFeeds = () => {
+    const [activeFeeds, setActiveFeeds] = useState<VideoFeed[]>([]);
+    const [feedQuality, setFeedQuality] = useState<Record<string, string>>({});
+    const [isRecording, setIsRecording] = useState<Record<string, boolean>>({});
+    const [streamService] = useState(() => new VideoStreamService());
+
+    useEffect(() => {
+        initializeFeeds();
+
+        return () => {
+            // Cleanup streams on unmount
+            activeFeeds.forEach(feed => {
+                streamService.stopStream(feed.cameraId);
+            });
+        };
+    }, []);
+
+    const initializeFeeds = async () => {
+        try {
+            // Get// src/guardian-protect/index.ts
+            export * from './components';
+            export * from './services';
+            export * from './hooks';
+            export * from './types';
+            export * from './workers';
+
+            // src/guardian-protect/types/index.ts
+            import { GuardianRoom, GuardianFloor, GuardianAlert } from '@eversight/core-foundation/types';
+
+            export interface FloorPlan {
+                id: string;
+                name: string;
+                level: number;
+                rooms: GuardianRoom[];
+                commonAreas: CommonArea[];
+                emergencyExits: EmergencyExit[];
+                cameraPositions: CameraPosition[];
+            }
+
+            export interface CommonArea {
+                id: string;
+                name: string;
+                type: 'lobby' | 'dining' | 'recreation' | 'hallway' | 'elevator' | 'stairs' | 'kitchen' | 'library' | 'fitness' | 'garden';
+                floor: number;
+                coordinates: { x: number; y: number; width: number; height: number };
+                capacity: number;
+                monitoringLevel: 'high' | 'medium' | 'low';
+                specialRequirements?: string[];
+            }
+
+            export interface CameraPosition {
+                id: string;
+                name: string;
+                type: 'room' | 'hallway' | 'overhead' | 'entrance' | 'outdoor';
+                floor: number;
+                coordinates: { x: number; y: number };
+                coverage: { x: number; y: number; width: number; height: number };
+                isActive: boolean;
+                streamUrl: string;
+                capabilities: CameraCapability[];
+            }
+
+            export interface CameraCapability {
+                type: 'fall_detection' | 'facial_recognition' | 'motion_detection' | 'night_vision' | 'audio';
+                enabled: boolean;
+                sensitivity: number;
+            }
+
+            export interface VideoFeed {
+                cameraId: string;
+                streamUrl: string;
+                isLive: boolean;
+                quality: 'low' | 'medium' | 'high' | 'ultra';
+                latency: number;
+                lastUpdate: Date;
+            }
+
+            export interface FallDetectionEvent {
+                id: string;
+                cameraId: string;
+                roomId?: string;
+                residentId?: string;
+                timestamp: Date;
+                confidence: number;
+                coordinates: { x: number; y: number };
+                severity: 'low' | 'medium' | 'high' | 'critical';
+                status: 'detected' | 'acknowledged' | 'responding' | 'resolved' | 'false_positive';
+                responseTime?: number;
+                videoClipUrl?: string;
+            }
+
+            export interface HeatMapData {
+                floor: number;
+                zones: HeatMapZone[];
+                timestamp: Date;
+                aggregationPeriod: 'hour' | 'day' | 'week' | 'month';
+            }
+
+            export interface HeatMapZone {
+                id: string;
+                coordinates: { x: number; y: number; width: number; height: number };
+                riskLevel: number; // 0-100
+                incidentCount: number;
+                category: 'fall_risk' | 'high_traffic' | 'wandering' | 'medical_emergency';
+                recommendedActions: string[];
+            }
+
+            export interface EmergencyResponse {
+                id: string;
+                type: 'fall' | 'medical' | 'fire' | 'security' | 'natural_disaster';
+                priority: 'low' | 'medium' | 'high' | 'critical';
+                location: {
+                    floor: number;
+                    roomId?: string;
+                    coordinates: { x: number; y: number };
+                };
+                timestamp: Date;
+                respondersAssigned: string[];
+                estimatedResponseTime: number;
+                status: 'initiated' | 'acknowledged' | 'en_route' | 'on_scene' | 'resolved';
+                escalationLevel: number;
+            }
+
+            // src/guardian-protect/components/FloorPlanView.tsx
+            import React, { useState, useCallback, useEffect, useRef } from 'react';
+            import { GuardianRoom, GuardianAlert } from '@eversight/core-foundation/types';
+            import { useFloorPlan } from '../hooks/useFloorPlan';
+            import { useVideoFeeds } from '../hooks/useVideoFeeds';
+            import { useFallDetection } from '../hooks/useFallDetection';
+            import { FloorPlan, CommonArea, CameraPosition } from '../types';
+
+            interface FloorPlanViewProps {
+                selectedFloor: number;
+                onFloorChange: (floor: number) => void;
+                onRoomSelect: (roomId: string) => void;
+                onCameraSelect: (cameraId: string) => void;
+            }
+
+            export const FloorPlanView: React.FC<FloorPlanViewProps> = ({
+                selectedFloor,
+                onFloorChange,
+                onRoomSelect,
+                onCameraSelect
+            }) => {
+                const canvasRef = useRef<HTMLCanvasElement>(null);
+                const [selectedRoom, setSelectedRoom] = useState<string | null>(null);
+                const [hoveredElement, setHoveredElement] = useState<string | null>(null);
+                const [viewMode, setViewMode] = useState<'normal' | 'heatmap' | 'cameras'>('normal');
+
+                const { floorPlan, rooms, commonAreas, isLoading } = useFloorPlan(selectedFloor);
+                const { activeFeeds, feedQuality } = useVideoFeeds();
+                const { fallEvents, riskZones } = useFallDetection();
+
+                // Floor plan rendering logic
+                const renderFloorPlan = useCallback(() => {
+                    const canvas = canvasRef.current;
+                    if (!canvas || !floorPlan) return;
+
+                    const ctx = canvas.getContext('2d');
+                    if (!ctx) return;
+
+                    // Clear canvas
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                    // Draw floor background
+                    ctx.fillStyle = '#f8f9fa';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                    // Draw rooms
+                    rooms.forEach(room => {
+                        const isSelected = selectedRoom === room.id;
+                        const isOccupied = room.currentOccupants && room.currentOccupants.length > 0;
+                        const hasAlert = fallEvents.some(event => event.roomId === room.id && event.status !== 'resolved');
+
+                        // Room background
+                        ctx.fillStyle = hasAlert ? '#fee2e2' : isOccupied ? '#fef3c7' : '#f3f4f6';
+                        ctx.fillRect(room.coordinates.x, room.coordinates.y, room.coordinates.width, room.coordinates.height);
+
+                        // Room border
+                        ctx.strokeStyle = isSelected ? '#3b82f6' : hasAlert ? '#ef4444' : '#d1d5db';
+                        ctx.lineWidth = isSelected ? 3 : hasAlert ? 2 : 1;
+                        ctx.strokeRect(room.coordinates.x, room.coordinates.y, room.coordinates.width, room.coordinates.height);
+
+                        // Room number
+                        ctx.fillStyle = '#374151';
+                        ctx.font = '14px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(
+                            room.number,
+                            room.coordinates.x + room.coordinates.width / 2,
+                            room.coordinates.y + room.coordinates.height / 2
+                        );
+
+                        // Occupancy indicator
+                        if (isOccupied) {
+                            ctx.fillStyle = '#10b981';
+                            ctx.beginPath();
+                            ctx.arc(room.coordinates.x + 10, room.coordinates.y + 10, 5, 0, 2 * Math.PI);
+                            ctx.fill();
+                        }
+
+                        // Alert indicator
+                        if (hasAlert) {
+                            ctx.fillStyle = '#ef4444';
+                            ctx.beginPath();
+                            ctx.arc(room.coordinates.x + room.coordinates.width - 10, room.coordinates.y + 10, 5, 0, 2 * Math.PI);
+                            ctx.fill();
+
+                            // Pulsing effect for critical alerts
+                            const criticalAlert = fallEvents.find(event =>
+                                event.roomId === room.id && event.severity === 'critical'
+                            );
+                            if (criticalAlert) {
+                                ctx.strokeStyle = '#ef4444';
+                                ctx.lineWidth = 2;
+                                ctx.setLineDash([5, 5]);
+                                ctx.strokeRect(room.coordinates.x - 2, room.coordinates.y - 2,
+                                    room.coordinates.width + 4, room.coordinates.height + 4);
+                                ctx.setLineDash([]);
+                            }
+                        }
+                    });
+
+                    // Draw common areas
+                    commonAreas.forEach(area => {
+                        const hasActivity = area.type === 'dining' || area.type === 'recreation';
+
+                        ctx.fillStyle = hasActivity ? '#dbeafe' : '#f9fafb';
+                        ctx.fillRect(area.coordinates.x, area.coordinates.y, area.coordinates.width, area.coordinates.height);
+
+                        ctx.strokeStyle = '#9ca3af';
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(area.coordinates.x, area.coordinates.y, area.coordinates.width, area.coordinates.height);
+
+                        // Area label
+                        ctx.fillStyle = '#6b7280';
+                        ctx.font = '12px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(
+                            area.name,
+                            area.coordinates.x + area.coordinates.width / 2,
+                            area.coordinates.y + area.coordinates.height / 2
+                        );
+                    });
+
+                    // Draw cameras if in camera view mode
+                    if (viewMode === 'cameras' && floorPlan.cameraPositions) {
+                        floorPlan.cameraPositions.forEach(camera => {
+                            const isActive = activeFeeds.some(feed => feed.cameraId === camera.id);
+                            const quality = feedQuality[camera.id] || 'medium';
+
+                            // Camera icon
+                            ctx.fillStyle = isActive ? '#10b981' : '#6b7280';
+                            ctx.beginPath();
+                            ctx.arc(camera.coordinates.x, camera.coordinates.y, 8, 0, 2 * Math.PI);
+                            ctx.fill();
+
+                            // Coverage area
+                            if (isActive) {
+                                ctx.fillStyle = 'rgba(16, 185, 129, 0.1)';
+                                ctx.fillRect(camera.coverage.x, camera.coverage.y,
+                                    camera.coverage.width, camera.coverage.height);
+                            }
+
+                            // Quality indicator
+                            const qualityColor = {
+                                low: '#ef4444',
+                                medium: '#f59e0b',
+                                high: '#10b981',
+                                ultra: '#3b82f6'
+                            }[quality];
+
+                            ctx.fillStyle = qualityColor;
+                            ctx.fillRect(camera.coordinates.x - 2, camera.coordinates.y - 12, 4, 4);
+                        });
+                    }
+
+                    // Draw heat map overlay if in heatmap mode
+                    if (viewMode === 'heatmap' && riskZones) {
+                        riskZones.forEach(zone => {
+                            const alpha = Math.min(zone.riskLevel / 100, 0.7);
+                            const hue = (1 - zone.riskLevel / 100) * 120; // Red to green
+
+                            ctx.fillStyle = `hsla(${hue}, 70%, 50%, ${alpha})`;
+                            ctx.fillRect(zone.coordinates.x, zone.coordinates.y,
+                                zone.coordinates.width, zone.coordinates.height);
+                        });
+                    }
+
+                }, [floorPlan, rooms, commonAreas, selectedRoom, fallEvents, activeFeeds, feedQuality, viewMode, riskZones]);
+
+                // Handle canvas clicks
+                const handleCanvasClick = useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
+                    const canvas = canvasRef.current;
+                    if (!canvas) return;
+
+                    const rect = canvas.getBoundingClientRect();
+                    const x = event.clientX - rect.left;
+                    const y = event.clientY - rect.top;
+
+                    // Check room clicks
+                    const clickedRoom = rooms.find(room =>
+                        x >= room.coordinates.x && x <= room.coordinates.x + room.coordinates.width &&
+                        y >= room.coordinates.y && y <= room.coordinates.y + room.coordinates.height
+                    );
+
+                    if (clickedRoom) {
+                        setSelectedRoom(clickedRoom.id);
+                        onRoomSelect(clickedRoom.id);
+                        return;
+                    }
+
+                    // Check camera clicks if in camera mode
+                    if (viewMode === 'cameras' && floorPlan?.cameraPositions) {
+                        const clickedCamera = floorPlan.cameraPositions.find(camera => {
+                            const distance = Math.sqrt(
+                                Math.pow(x - camera.coordinates.x, 2) + Math.pow(y - camera.coordinates.y, 2)
+                            );
+                            return distance <= 10;
+                        });
+
+                        if (clickedCamera) {
+                            onCameraSelect(clickedCamera.id);
+                            return;
+                        }
+                    }
+
+                    // Clear selection if clicking empty space
+                    setSelectedRoom(null);
+                }, [rooms, floorPlan, viewMode, onRoomSelect, onCameraSelect]);
+
+                // Render canvas on changes
+                useEffect(() => {
+                    renderFloorPlan();
+                }, [renderFloorPlan]);
+
+                if (isLoading) {
+                    return (
+                        <div className= "flex items-center justify-center h-96" >
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" > </div>
+                            < span className = "ml-2 text-gray-600" > Loading floor plan...</span>
+                                </div>
+    );
+  }
+
+return (
+    <div className= "bg-white rounded-lg shadow-sm border" >
+    {/* Floor Navigation */ }
+    < div className = "flex items-center justify-between p-4 border-b" >
+        <div className="flex items-center space-x-4" >
+            <h3 className="text-lg font-semibold text-gray-900" > Floor Plan View </h3>
+                < div className = "flex space-x-2" >
+                {
+                    [1, 2, 0].map(floor => (
+                        <button
+                key= { floor }
+                onClick = {() => onFloorChange(floor)}
+className = {`px-3 py-1 rounded text-sm font-medium ${selectedFloor === floor
+        ? 'bg-blue-600 text-white'
+        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+    }`}
+              >
+    { floor === 0 ? 'Outdoor' : `Floor ${floor}`}
+</button>
+            ))}
+</div>
+    </div>
+
+{/* View Mode Toggle */ }
+<div className="flex items-center space-x-2" >
+    <span className="text-sm text-gray-600" > View: </span>
+        < select
+value = { viewMode }
+onChange = {(e) => setViewMode(e.target.value as any)}
+className = "border border-gray-300 rounded px-2 py-1 text-sm"
+    >
+    <option value="normal" > Normal </option>
+        < option value = "heatmap" > Risk Heat Map </option>
+            < option value = "cameras" > Camera Coverage </option>
+                </select>
+                </div>
+                </div>
+
+{/* Floor Plan Canvas */ }
+<div className="p-4" >
+    <canvas
+          ref={ canvasRef }
+width = { 800}
+height = { 600}
+onClick = { handleCanvasClick }
+className = "border border-gray-200 rounded cursor-pointer"
+    />
+    </div>
+
+{/* Floor Statistics */ }
+<div className="flex items-center justify-between p-4 bg-gray-50 rounded-b-lg" >
+    <div className="flex space-x-6 text-sm" >
+        <div>
+        <span className="text-gray-600" > Total Rooms: </span>
+            < span className = "ml-1 font-medium" > { rooms.length } </span>
+                </div>
+                < div >
+                <span className="text-gray-600" > Occupied: </span>
+                    < span className = "ml-1 font-medium" >
+                        { rooms.filter(r => r.currentOccupants?.length).length }
+                        </span>
+                        </div>
+                        < div >
+                        <span className="text-gray-600" > Active Alerts: </span>
+                            < span className = "ml-1 font-medium text-red-600" >
+                                { fallEvents.filter(e => e.status !== 'resolved').length }
+                                </span>
+                                </div>
+                                < div >
+                                <span className="text-gray-600" > Cameras Online: </span>
+                                    < span className = "ml-1 font-medium text-green-600" >
+                                        { activeFeeds.length }
+                                        </span>
+                                        </div>
+                                        </div>
+
+{/* Legend for current view mode */ }
+{
+    viewMode === 'heatmap' && (
+        <div className="flex items-center space-x-2 text-xs" >
+            <span className="text-gray-600" > Risk Level: </span>
+                < div className = "flex items-center space-x-1" >
+                    <div className="w-3 h-3 bg-green-400 rounded" > </div>
+                        < span > Low </span>
+                        </div>
+                        < div className = "flex items-center space-x-1" >
+                            <div className="w-3 h-3 bg-yellow-400 rounded" > </div>
+                                < span > Medium </span>
+                                </div>
+                                < div className = "flex items-center space-x-1" >
+                                    <div className="w-3 h-3 bg-red-400 rounded" > </div>
+                                        < span > High </span>
+                                        </div>
+                                        </div>
+        )
+}
+</div>
+    </div>
+  );
+};
+
+// src/guardian-protect/components/VideoFeedGrid.tsx
+import React, { useState, useEffect, useRef } from 'react';
+import { VideoFeed, CameraPosition } from '../types';
+import { useVideoFeeds } from '../hooks/useVideoFeeds';
+
+interface VideoFeedGridProps {
+    selectedCameras: string[];
+    onCameraSelect: (cameraId: string) => void;
+    layout: '1x1' | '2x2' | '3x3' | '4x4';
+    onLayoutChange: (layout: '1x1' | '2x2' | '3x3' | '4x4') => void;
+}
+
+export const VideoFeedGrid: React.FC<VideoFeedGridProps> = ({
+    selectedCameras,
+    onCameraSelect,
+    layout,
+    onLayoutChange
+}) => {
+    const [fullscreenCamera, setFullscreenCamera] = useState<string | null>(null);
+    const [focusedCamera, setFocusedCamera] = useState<string | null>(null);
+    const gridRef = useRef<HTMLDivElement>(null);
+
+    const {
+        activeFeeds,
+        feedQuality,
+        switchCamera,
+        adjustQuality,
+        isRecording,
+        startRecording,
+        stopRecording
+    } = useVideoFeeds();
+
+    const gridConfigs = {
+        '1x1': { rows: 1, cols: 1, maxCameras: 1 },
+        '2x2': { rows: 2, cols: 2, maxCameras: 4 },
+        '3x3': { rows: 3, cols: 3, maxCameras: 9 },
+        '4x4': { rows: 4, cols: 4, maxCameras: 16 }
+    };
+
+    const currentConfig = gridConfigs[layout];
+    const displayedCameras = selectedCameras.slice(0, currentConfig.maxCameras);
+
+    const VideoFeedComponent: React.FC<{
+        feed: VideoFeed;
+        position: number;
+        isFullscreen?: boolean
+    }> = ({ feed, position, isFullscreen = false }) => {
+        const videoRef = useRef<HTMLVideoElement>(null);
+        const [isConnected, setIsConnected] = useState(false);
+        const [error, setError] = useState<string | null>(null);
+
+        useEffect(() => {
+            const video = videoRef.current;
+            if (!video) return;
+
+            const handleLoadStart = () => setIsConnected(true);
+            const handleError = () => {
+                setError('Connection failed');
+                setIsConnected(false);
+            };
+            const handleLoadedData = () => setError(null);
+
+            video.addEventListener('loadstart', handleLoadStart);
+            video.addEventListener('error', handleError);
+            video.addEventListener('loadeddata', handleLoadedData);
+
+            // Set video source
+            video.src = feed.streamUrl;
+            video.load();
+
+            return () => {
+                video.removeEventListener('loadstart', handleLoadStart);
+                video.removeEventListener('error', handleError);
+                video.removeEventListener('loadeddata', handleLoadedData);
+            };
+        }, [feed.streamUrl]);
+
+        return (
+            <div 
+        className= {`relative bg-black rounded-lg overflow-hidden group ${isFullscreen ? 'fixed inset-0 z-50' : 'aspect-video'
+                }`
+    }
+    onClick = {() => !isFullscreen && setFocusedCamera(feed.cameraId)}
+onDoubleClick = {() => setFullscreenCamera(isFullscreen ? null : feed.cameraId)}
+      >
+    {/* Video Element */ }
+    < video
+ref = { videoRef }
+className = "w-full h-full object-cover"
+autoPlay
+muted
+playsInline
+    />
+
+    {/* Connection Status Overlay */ }
+{
+    !isConnected && (
+        <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75" >
+            <div className="text-center text-white" >
+            {
+                error?(
+                <>
+                <div className="text-red-400 mb-2" >⚠ { error } </div>
+                    < button
+    onClick = {() => window.location.reload()
+}
+className = "text-blue-400 hover:text-blue-300 text-sm"
+    >
+    Retry Connection
+        </button>
+        </>
+              ) : (
+    <>
+    <div className= "animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-2" > </div>
+    < div className = "text-sm" > Connecting...</div>
+        </>
+              )}
+</div>
+    </div>
+        )}
+
+{/* Camera Info Overlay */ }
+<div className="absolute top-2 left-2 bg-black bg-opacity-75 text-white px-2 py-1 rounded text-xs" >
+    <div className="flex items-center space-x-2" >
+        <span className={ `w-2 h-2 rounded-full ${feed.isLive ? 'bg-red-500' : 'bg-gray-500'}` }> </span>
+            < span > { feed.cameraId } </span>
+{ feed.isLive && <span className="text-red-400" > LIVE </span> }
+</div>
+    </div>
+
+{/* Quality Indicator */ }
+<div className="absolute top-2 right-2 bg-black bg-opacity-75 text-white px-2 py-1 rounded text-xs" >
+    <div className="flex items-center space-x-1" >
+        <div className={
+            `w-2 h-2 rounded-full ${feedQuality[feed.cameraId] === 'ultra' ? 'bg-blue-500' :
+                feedQuality[feed.cameraId] === 'high' ? 'bg-green-500' :
+                    feedQuality[feed.cameraId] === 'medium' ? 'bg-yellow-500' : 'bg-red-500'
+            }`
+}> </div>
+    < span > { feedQuality[feed.cameraId]?.toUpperCase() } </span>
+    </div>
+    </div>
+
+{/* Controls Overlay (visible on hover) */ }
+<div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black to-transparent p-4 opacity-0 group-hover:opacity-100 transition-opacity" >
+    <div className="flex items-center justify-between text-white" >
+        <div className="flex space-x-2" >
+            {/* Recording Control */ }
+            < button
+onClick = {(e) => {
+    e.stopPropagation();
+    isRecording[feed.cameraId] ? stopRecording(feed.cameraId) : startRecording(feed.cameraId);
+}}
+className = {`p-1 rounded ${isRecording[feed.cameraId] ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700'
+    }`}
+title = { isRecording[feed.cameraId]? 'Stop Recording' : 'Start Recording'}
+    >
+    <div className="w-4 h-4 flex items-center justify-center" >
+        { isRecording[feed.cameraId]? '⏹' : '⏺'}
+        </div>
+        </button>
+
+{/* Quality Control */ }
+<select
+                value={ feedQuality[feed.cameraId] || 'medium' }
+onChange = {(e) => adjustQuality(feed.cameraId, e.target.value as any)}
+className = "bg-gray-600 text-white text-xs rounded px-1 py-1"
+onClick = {(e) => e.stopPropagation()}
+              >
+    <option value="low" > Low </option>
+        < option value = "medium" > Medium </option>
+            < option value = "high" > High </option>
+                < option value = "ultra" > Ultra </option>
+                    </select>
+                    </div>
+
+                    < div className = "flex space-x-2" >
+                        {/* Fullscreen Toggle */ }
+                        < button
+onClick = {(e) => {
+    e.stopPropagation();
+    setFullscreenCamera(isFullscreen ? null : feed.cameraId);
+}}
+className = "p-1 bg-gray-600 hover:bg-gray-700 rounded"
+title = { isFullscreen? 'Exit Fullscreen': 'Fullscreen' }
+    >
+    <div className="w-4 h-4 flex items-center justify-center" >
+        { isFullscreen? '⊟': '⊞' }
+        </div>
+        </button>
+
+{/* Camera Switch */ }
+<button
+                onClick={
+    (e) => {
+        e.stopPropagation();
+        onCameraSelect(feed.cameraId);
+    }
+}
+className = "p-1 bg-gray-600 hover:bg-gray-700 rounded"
+title = "Switch Camera"
+    >
+    <div className="w-4 h-4 flex items-center justify-center" >↻</div>
+        </button>
+        </div>
+        </div>
+
+{/* Feed Statistics */ }
+<div className="flex justify-between text-xs text-gray-300 mt-2" >
+    <span>Latency: { feed.latency } ms </span>
+        < span > Updated: { new Date(feed.lastUpdate).toLocaleTimeString() } </span>
+            </div>
+            </div>
+
+{/* Focus Indicator */ }
+{
+    focusedCamera === feed.cameraId && (
+        <div className="absolute inset-0 border-4 border-blue-500 pointer-events-none" > </div>
+        )
+}
+</div>
+    );
+  };
+
+return (
+    <div className= "bg-white rounded-lg shadow-sm border" >
+    {/* Grid Controls */ }
+    < div className = "flex items-center justify-between p-4 border-b" >
+        <h3 className="text-lg font-semibold text-gray-900" > Video Surveillance </h3>
+
+            < div className = "flex items-center space-x-4" >
+                {/* Layout Selection */ }
+                < div className = "flex items-center space-x-2" >
+                    <span className="text-sm text-gray-600" > Layout: </span>
+{
+    Object.keys(gridConfigs).map(layoutOption => (
+        <button
+                key= { layoutOption }
+                onClick = {() => onLayoutChange(layoutOption as any)}
+className = {`px-2 py-1 text-xs rounded ${layout === layoutOption
+        ? 'bg-blue-600 text-white'
+        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+    }`}
+              >
+    { layoutOption }
+    </button>
+            ))}
+</div>
+
+{/* Active Cameras Count */ }
+<div className="text-sm text-gray-600" >
+    Cameras: { displayedCameras.length }/{currentConfig.maxCameras}
+        </div>
+        </div>
+        </div>
+
+{/* Video Grid */ }
+<div className="p-4" >
+    <div 
+          ref={ gridRef }
+className = {`grid gap-4 ${layout === '1x1' ? 'grid-cols-1' :
+        layout === '2x2' ? 'grid-cols-2' :
+            layout === '3x3' ? 'grid-cols-3' :
+                'grid-cols-4'
+    }`}
+        >
+{
+    displayedCameras.map((cameraId, index) => {
+        const feed = activeFeeds.find(f => f.cameraId === cameraId);
+        if (!feed) {
+            return (
+                <div key= { cameraId } className = "aspect-video bg-gray-100 rounded-lg flex items-center justify-center" >
+                    <div className="text-center text-gray-500" >
+                        <div className="text-2xl mb-2" >📹</div>
+                            < div className = "text-sm" > Camera Offline </div>
+                                < div className = "text-xs text-gray-400" > { cameraId } </div>
+                                    </div>
+                                    </div>
+              );
+}
+
+return (
+    <VideoFeedComponent
+                key= { cameraId }
+feed = { feed }
+position = { index }
+isFullscreen = { fullscreenCamera === cameraId}
+              />
+            );
+          })}
+
+{/* Empty Slots */ }
+{
+    Array.from({ length: currentConfig.maxCameras - displayedCameras.length }).map((_, index) => (
+        <div 
+              key= {`empty-${index}`}
+className = "aspect-video bg-gray-50 border-2 border-dashed border-gray-300 rounded-lg flex items-center justify-center cursor-pointer hover:border-gray-400"
+onClick = {() => {
+    // Open camera selection modal
+    console.log('Open camera selection');
+}}
+            >
+    <div className="text-center text-gray-400" >
+        <div className="text-2xl mb-2" > +</div>
+            < div className = "text-sm" > Add Camera </div>
+                </div>
+                </div>
+          ))}
+</div>
+    </div>
+
+{/* Grid Status Bar */ }
+<div className="flex items-center justify-between p-4 bg-gray-50 border-t" >
+    <div className="flex space-x-6 text-sm" >
+        <div>
+        <span className="text-gray-600" > Total Feeds: </span>
+            < span className = "ml-1 font-medium" > { activeFeeds.length } </span>
+                </div>
+                < div >
+                <span className="text-gray-600" > Recording: </span>
+                    < span className = "ml-1 font-medium text-red-600" >
+                        { Object.values(isRecording).filter(Boolean).length }
+                        </span>
+                        </div>
+                        < div >
+                        <span className="text-gray-600" > Avg Latency: </span>
+                            < span className = "ml-1 font-medium" >
+                                { Math.round(activeFeeds.reduce((sum, feed) => sum + feed.latency, 0) / activeFeeds.length || 0) }ms
+                                    </span>
+                                    </div>
+                                    </div>
+
+{/* Quick Actions */ }
+<div className="flex space-x-2" >
+    <button
+            onClick={
+    () => {
+        // Record all feeds
+        activeFeeds.forEach(feed => !isRecording[feed.cameraId] && startRecording(feed.cameraId));
+    }
+}
+className = "px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700"
+    >
+    Record All
+        </button>
+        < button
+onClick = {() => {
+    // Stop all recordings
+    activeFeeds.forEach(feed => isRecording[feed.cameraId] && stopRecording(feed.cameraId));
+}}
+className = "px-3 py-1 bg-gray-600 text-white text-sm rounded hover:bg-gray-700"
+    >
+    Stop All
+        </button>
+        </div>
+        </div>
+
+{/* Fullscreen Exit Handler */ }
+{
+    fullscreenCamera && (
+        <div 
+          className="fixed inset-0 bg-black z-40"
+    onClick = {() => setFullscreenCamera(null)
+}
+        >
+    {(() => {
+        const feed = activeFeeds.find(f => f.cameraId === fullscreenCamera);
+        return feed ? (
+            <VideoFeedComponent
+                feed= { feed }
+                position = { 0}
+        isFullscreen = { true}
+            />
+            ) : null;
+          }) ()}
+</div>
+      )}
+</div>
+  );
+};
+
+// src/guardian-protect/components/HeatMapOverlay.tsx
+import React, { useState, useEffect, useMemo } from 'react';
+import { HeatMapData, HeatMapZone } from '../types';
+import { useFallDetection } from '../hooks/useFallDetection';
+
+interface HeatMapOverlayProps {
+    floor: number;
+    timeRange: 'hour' | 'day' | 'week' | 'month';
+    onTimeRangeChange: (range: 'hour' | 'day' | 'week' | 'month') => void;
+    onZoneClick: (zone: HeatMapZone) => void;
+}
+
+export const HeatMapOverlay: React.FC<HeatMapOverlayProps> = ({
+    floor,
+    timeRange,
+    onTimeRangeChange,
+    onZoneClick
+}) => {
+    const [selectedCategory, setSelectedCategory] = useState<string>('all');
+    const [intensityFilter, setIntensityFilter] = useState<number>(0);
+
+    const {
+        heatMapData,
+        riskZones,
+        isLoading,
+        getZoneRecommendations,
+        getZoneHistory
+    } = useFallDetection();
+
+    const currentHeatMap = useMemo(() => {
+        return heatMapData.find(data =>
+            data.floor === floor && data.aggregationPeriod === timeRange
+        );
+    }, [heatMapData, floor, timeRange]);
+
+    const filteredZones = useMemo(() => {
+        if (!currentHeatMap) return [];
+
+        return currentHeatMap.zones.filter(zone => {
+            const categoryMatch = selectedCategory === 'all' || zone.category === selectedCategory;
+            const intensityMatch = zone.riskLevel >= intensityFilter;
+            return categoryMatch && intensityMatch;
+        });
+    }, [currentHeatMap, selectedCategory, intensityFilter]);
+
+    const categoryColors = {
+        fall_risk: '#ef4444',
+        high_traffic: '#f59e0b',
+        wandering: '#8b5cf6',
+        medical_emergency: '#dc2626'
+    };
+
+    const ZoneTooltip: React.FC<{ zone: HeatMapZone }> = ({ zone }) => (
+        <div className= "absolute z-50 bg-white border border-gray-300 rounded-lg shadow-lg p-3 max-w-xs" >
+        <div className="space-y-2" >
+            <div className="flex items-center justify-between" >
+                <h4 className="font-semibold text-gray-900" > Zone { zone.id } </h4>
+                    < span className = {`px-2 py-1 text-xs rounded-full text-white`
+}
+style = {{ backgroundColor: categoryColors[zone.category] }}>
+    { zone.category.replace('_', ' ').toUpperCase() }
+    </span>
+    </div>
+
+    < div className = "space-y-1 text-sm" >
+        <div className="flex justify-between" >
+            <span className="text-gray-600" > Risk Level: </span>
+                < span className = "font-medium" > { zone.riskLevel } % </span>
+                    </div>
+                    < div className = "flex justify-between" >
+                        <span className="text-gray-600" > Incidents: </span>
+                            < span className = "font-medium" > { zone.incidentCount } </span>
+                                </div>
+                                </div>
+
+{
+    zone.recommendedActions.length > 0 && (
+        <div className="mt-2" >
+            <h5 className="text-xs font-semibold text-gray-700 mb-1" > Recommendations: </h5>
+                < ul className = "text-xs text-gray-600 space-y-1" >
+                {
+                    zone.recommendedActions.slice(0, 3).map((action, index) => (
+                        <li key= { index } className = "flex items-start" >
+                        <span className="w-1 h-1 bg-gray-400 rounded-full mt-1.5 mr-2 flex-shrink-0" > </span>
+                  { action }
+                        </li>
+                    ))
+                }
+                    </ul>
+                    </div>
+        )
+}
+</div>
+    </div>
+  );
+
+if (isLoading) {
+    return (
+        <div className= "flex items-center justify-center h-64" >
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" > </div>
+            < span className = "ml-2 text-gray-600" > Loading heat map data...</span>
+                </div>
+    );
+}
+
+return (
+    <div className= "bg-white rounded-lg shadow-sm border" >
+    {/* Heat Map Controls */ }
+    < div className = "flex items-center justify-between p-4 border-b" >
+        <h3 className="text-lg font-semibold text-gray-900" > Risk Heat Map </h3>
+
+            < div className = "flex items-center space-x-4" >
+                {/* Time Range Selection */ }
+                < div className = "flex items-center space-x-2" >
+                    <span className="text-sm text-gray-600" > Period: </span>
+                        < select
+value = { timeRange }
+onChange = {(e) => onTimeRangeChange(e.target.value as any)}
+className = "border border-gray-300 rounded px-2 py-1 text-sm"
+    >
+    <option value="hour" > Last Hour </option>
+        < option value = "day" > Last 24 Hours </option>
+            < option value = "week" > Last Week </option>
+                < option value = "month" > Last Month </option>
+                    </select>
+                    </div>
+
+{/* Category Filter */ }
+<div className="flex items-center space-x-2" >
+    <span className="text-sm text-gray-600" > Category: </span>
+        < select
+value = { selectedCategory }
+onChange = {(e) => setSelectedCategory(e.target.value)}
+className = "border border-gray-300 rounded px-2 py-1 text-sm"
+    >
+    <option value="all" > All Categories </option>
+        < option value = "fall_risk" > Fall Risk </option>
+            < option value = "high_traffic" > High Traffic </option>
+                < option value = "wandering" > Wandering </option>
+                    < option value = "medical_emergency" > Medical Emergency </option>
+                        </select>
+                        </div>
+
+{/* Intensity Filter */ }
+<div className="flex items-center space-x-2" >
+    <span className="text-sm text-gray-600" > Min Risk: </span>
+        < input
+type = "range"
+min = "0"
+max = "100"
+value = { intensityFilter }
+onChange = {(e) => setIntensityFilter(Number(e.target.value))}
+className = "w-20"
+    />
+    <span className="text-sm font-medium w-8" > { intensityFilter } % </span>
+        </div>
+        </div>
+        </div>
+
+{/* Heat Map Visualization */ }
+<div className="p-4" >
+{
+    currentHeatMap?(
+          <div className = "relative" >
+            {/* Zone Overlays */ }
+            < svg
+              viewBox = "0 0 800 600"
+              className = "w-full h-96 border border-gray-200 rounded"
+            >
+            {
+                filteredZones.map((zone, index) => {
+                    const intensity = zone.riskLevel / 100;
+                    const hue = (1 - intensity) * 120; // Red to green scale
+                    const opacity = Math.max(0.3, intensity);
+
+                    return (
+                        <g key= { zone.id } >
+                        {/* Zone Rectangle */ }
+                        < rect
+                    x = { zone.coordinates.x }
+                    y = { zone.coordinates.y }
+                    width = { zone.coordinates.width }
+                    height = { zone.coordinates.height }
+                    fill = {`hsla(${hue}, 70%, 50%, ${opacity})`
+                }
+                      stroke = { categoryColors[zone.category]}
+                      strokeWidth = { 2}
+                      className = "cursor-pointer hover:stroke-4 transition-all"
+                      onClick = {() => onZoneClick(zone)}
+            />
+
+            {/* Zone Label */ }
+            < text
+                      x = { zone.coordinates.x + zone.coordinates.width / 2 }
+                      y = { zone.coordinates.y + zone.coordinates.height / 2 }
+                      textAnchor = "middle"
+                      dominantBaseline = "middle"
+                      fill = "white"
+                      fontSize = "12"
+                      fontWeight = "bold"
+                      className = "pointer-events-none drop-shadow-lg"
+            >
+            { zone.riskLevel } %
+            </text>
+                    
+                    {/* Incident Count Badge */ }
+                    { zone.incidentCount > 0 && (
+        <circle
+                        cx={ zone.coordinates.x + zone.coordinates.width - 10 }
+cy = { zone.coordinates.y + 10 }
+r = "8"
+fill = "#dc2626"
+className = "pointer-events-none"
+    />
+                    )}
+<text
+                      x={ zone.coordinates.x + zone.coordinates.width - 10 }
+y = { zone.coordinates.y + 10 }
+textAnchor = "middle"
+dominantBaseline = "middle"
+fill = "white"
+fontSize = "10"
+fontWeight = "bold"
+className = "pointer-events-none"
+    >
+    { zone.incidentCount }
+    </text>
+    </g>
+                );
+              })}
+</svg>
+
+{/* Legend */ }
+<div className="absolute bottom-4 left-4 bg-white bg-opacity-90 rounded-lg p-3" >
+    <h4 className="text-sm font-semibold mb-2" > Risk Level </h4>
+        < div className = "flex items-center space-x-4" >
+            <div className="flex items-center space-x-1" >
+                <div className="w-4 h-4 bg-green-400 rounded" > </div>
+                    < span className = "text-xs" > Low(0 - 33 %) </span>
+                        </div>
+                        < div className = "flex items-center space-x-1" >
+                            <div className="w-4 h-4 bg-yellow-400 rounded" > </div>
+                                < span className = "text-xs" > Medium(34 - 66 %) </span>
+                                    </div>
+                                    < div className = "flex items-center space-x-1" >
+                                        <div className="w-4 h-4 bg-red-400 rounded" > </div>
+                                            < span className = "text-xs" > High(67 - 100 %) </span>
+                                                </div>
+                                                </div>
+
+                                                < h4 className = "text-sm font-semibold mt-3 mb-2" > Categories </h4>
+                                                    < div className = "grid grid-cols-2 gap-2" >
+                                                    {
+                                                        Object.entries(categoryColors).map(([category, color]) => (
+                                                            <div key= { category } className = "flex items-center space-x-1" >
+                                                            <div 
+                      className="w-3 h-3 rounded" 
+                      style = {{ backgroundColor: color }}
+                                                        > </div>
+                                                        < span className = "text-xs" >
+                                                            { category.replace('_', ' ') }
+                                                            </span>
+                                                            </div>
+                ))}
+</div>
+    </div>
+    </div>
+        ) : (
+    <div className= "flex items-center justify-center h-64 text-gray-500" >
+    <div className="text-center" >
+        <div className="text-2xl mb-2" >📊</div>
+            < div > No heat map data available for this time period </div>
+                </div>
+                </div>
+)}
+</div>
+
+{/* Heat Map Statistics */ }
+<div className="flex items-center justify-between p-4 bg-gray-50 border-t" >
+    <div className="flex space-x-6 text-sm" >
+        <div>
+        <span className="text-gray-600" > Total Zones: </span>
+            < span className = "ml-1 font-medium" > { filteredZones.length } </span>
+                </div>
+                < div >
+                <span className="text-gray-600" > High Risk: </span>
+                    < span className = "ml-1 font-medium text-red-600" >
+                        { filteredZones.filter(z => z.riskLevel >= 67).length }
+                        </span>
+                        </div>
+                        < div >
+                        <span className="text-gray-600" > Total Incidents: </span>
+                            < span className = "ml-1 font-medium" >
+                                { filteredZones.reduce((sum, zone) => sum + zone.incidentCount, 0) }
+                                </span>
+                                </div>
+                                < div >
+                                <span className="text-gray-600" > Avg Risk: </span>
+                                    < span className = "ml-1 font-medium" >
+                                        { Math.round(filteredZones.reduce((sum, zone) => sum + zone.riskLevel, 0) / filteredZones.length || 0) } %
+                                        </span>
+                                        </div>
+                                        </div>
+
+{/* Heat Map Actions */ }
+<div className="flex space-x-2" >
+    <button className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700" >
+        Export Data
+            </button>
+            < button className = "px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700" >
+                Generate Report
+                    </button>
+                    </div>
+                    </div>
+                    </div>
+  );
+};
+
+// src/guardian-protect/components/AlertPanel.tsx
+import React, { useState, useEffect } from 'react';
+import { FallDetectionEvent, EmergencyResponse } from '../types';
+import { useFallDetection } from '../hooks/useFallDetection';
+import { useEventBus } from '@eversight/core-foundation/hooks';
+
+interface AlertPanelProps {
+    onAlertSelect: (alertId: string) => void;
+    onResponseInitiate: (alertId: string) => void;
+}
+
+export const AlertPanel: React.FC<AlertPanelProps> = ({
+    onAlertSelect,
+    onResponseInitiate
+}) => {
+    const [filterStatus, setFilterStatus] = useState<string>('active');
+    const [filterSeverity, setFilterSeverity] = useState<string>('all');
+    const [sortBy, setSortBy] = useState<'timestamp' | 'severity' | 'response_time'>('timestamp');
+    const [selectedAlert, setSelectedAlert] = useState<string | null>(null);
+
+    const {
+        fallEvents,
+        emergencyResponses,
+        acknowledgeAlert,
+        resolveAlert,
+        markFalsePositive,
+        escalateAlert
+    } = useFallDetection();
+
+    const { emit } = useEventBus();
+
+    const filteredAlerts = fallEvents.filter(alert => {
+        const statusMatch = filterStatus === 'all' ||
+            (filterStatus === 'active' && !['resolved', 'false_positive'].includes(alert.status)) ||
+            alert.status === filterStatus;
+
+        const severityMatch = filterSeverity === 'all' || alert.severity === filterSeverity;
+
+        return statusMatch && severityMatch;
+    }).sort((a, b) => {
+        switch (sortBy) {
+            case 'timestamp':
+                return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+            case 'severity':
+                const severityOrder = { critical: 4, high: 3, medium: 2, low: 1 };
+                return severityOrder[b.severity] - severityOrder[a.severity];
+            case 'response_time':
+                return (b.responseTime || 0) - (a.responseTime || 0);
+            default:
+                return 0;
+        }
+    });
+
+    const handleAlertAction = async (alertId: string, action: string) => {
+        try {
+            switch (action) {
+                case 'acknowledge':
+                    await acknowledgeAlert(alertId);
+                    break;
+                case 'resolve':
+                    await resolveAlert(alertId);
+                    break;
+                case 'false_positive':
+                    await markFalsePositive(alertId);
+                    break;
+                case 'escalate':
+                    await escalateAlert(alertId);
+                    break;
+            }
+
+            // Emit event for other modules
+            emit({
+                type: `guardian.alert.${action}`,
+                source: 'guardian-protect',
+                payload: { alertId },
+                timestamp: new Date(),
+                priority: 'medium'
+            });
+        } catch (error) {
+            console.error('Alert action failed:', error);
+        }
+    };
+
+    const getSeverityColor = (severity: string) => {
+        switch (severity) {
+            case 'critical': return 'bg-red-100 border-red-300 text-red-800';
+            case 'high': return 'bg-orange-100 border-orange-300 text-orange-800';
+            case 'medium': return 'bg-yellow-100 border-yellow-300 text-yellow-800';
+            case 'low': return 'bg-blue-100 border-blue-300 text-blue-800';
+            default: return 'bg-gray-100 border-gray-300 text-gray-800';
+        }
+    };
+
+    const getStatusColor = (status: string) => {
+        switch (status) {
+            case 'detected': return 'bg-red-500';
+            case 'acknowledged': return 'bg-yellow-500';
+            case 'responding': return 'bg-blue-500';
+            case 'resolved': return 'bg-green-500';
+            case 'false_positive': return 'bg-gray-500';
+            default: return 'bg-gray-400';
+        }
+    };
+
+    const AlertCard: React.FC<{ alert: FallDetectionEvent }> = ({ alert }) => {
+        const isSelected = selectedAlert === alert.id;
+        const response = emergencyResponses.find(r => r.id === alert.id);
+
+        return (
+            <div 
+        className= {`border rounded-lg p-4 cursor-pointer transition-all hover:shadow-md ${isSelected ? 'border-blue-500 bg-blue-50' : 'border-gray-200'
+                } ${getSeverityColor(alert.severity)}`
+    }
+    onClick = {() => {
+    setSelectedAlert(alert.id);
+    onAlertSelect(alert.id);
+}}
+      >
+    {/* Alert Header */ }
+    < div className = "flex items-center justify-between mb-3" >
+        <div className="flex items-center space-x-2" >
+            <div className={ `w-3 h-3 rounded-full ${getStatusColor(alert.status)}` }> </div>
+                < span className = "font-semibold text-sm" >
+                    Alert #{ alert.id.slice(-6) }
+</span>
+    < span className = {`px-2 py-1 text-xs rounded-full font-medium ${getSeverityColor(alert.severity)}`}>
+        { alert.severity.toUpperCase() }
+        </span>
+        </div>
+
+        < div className = "text-xs text-gray-500" >
+            { new Date(alert.timestamp).toLocaleTimeString() }
+            </div>
+            </div>
+
+{/* Alert Details */ }
+<div className="space-y-2" >
+    <div className="flex items-center justify-between text-sm" >
+        <span className="text-gray-600" > Location: </span>
+            < span className = "font-medium" >
+                { alert.roomId ? `Room ${alert.roomId}` : 'Common Area' }
+                </span>
+                </div>
+
+                < div className = "flex items-center justify-between text-sm" >
+                    <span className="text-gray-600" > Camera: </span>
+                        < span className = "font-medium" > { alert.cameraId } </span>
+                            </div>
+
+                            < div className = "flex items-center justify-between text-sm" >
+                                <span className="text-gray-600" > Confidence: </span>
+                                    < span className = "font-medium" > { Math.round(alert.confidence * 100) } % </span>
+                                        </div>
+
+{
+    alert.residentId && (
+        <div className="flex items-center justify-between text-sm" >
+            <span className="text-gray-600" > Resident: </span>
+                < span className = "font-medium" > { alert.residentId } </span>
+                    </div>
+          )
+}
+
+{
+    alert.responseTime && (
+        <div className="flex items-center justify-between text-sm" >
+            <span className="text-gray-600" > Response Time: </span>
+                < span className = "font-medium" > { alert.responseTime }s </span>
+                    </div>
+          )
+}
+</div>
+
+{/* Response Status */ }
+{
+    response && (
+        <div className="mt-3 p-2 bg-white bg-opacity-50 rounded border" >
+            <div className="flex items-center justify-between text-xs" >
+                <span className="text-gray-600" > Response Status: </span>
+                    < span className = "font-medium capitalize" > { response.status.replace('_', ' ') } </span>
+                        </div>
+    {
+        response.respondersAssigned.length > 0 && (
+            <div className="flex items-center justify-between text-xs mt-1" >
+                <span className="text-gray-600" > Responders: </span>
+                    < span className = "font-medium" > { response.respondersAssigned.length } assigned </span>
+                        </div>
+            )
+    }
+    </div>
+        )
+}
+
+{/* Action Buttons */ }
+<div className="flex space-x-2 mt-4" >
+{
+    alert.status === 'detected' && (
+        <button
+              onClick={
+    (e) => {
+        e.stopPropagation();
+        handleAlertAction(alert.id, 'acknowledge');
+    }
+}
+className = "flex-1 px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700"
+    >
+    Acknowledge
+    </button>
+          )}
+
+{
+    alert.status === 'acknowledged' && (
+        <>
+        <button
+                onClick={
+        (e) => {
+            e.stopPropagation();
+            onResponseInitiate(alert.id);
+        }
+    }
+    className = "flex-1 px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+        >
+        Respond
+        </button>
+        < button
+    onClick = {(e) => {
+        e.stopPropagation();
+        handleAlertAction(alert.id, 'false_positive');
+    }
+}
+className = "flex-1 px-3 py-1 bg-gray-600 text-white text-xs rounded hover:bg-gray-700"
+    >
+    False Alarm
+        </button>
+        </>
+          )}
+
+{
+    ['acknowledged', 'responding'].includes(alert.status) && (
+        <button
+              onClick={
+        (e) => {
+            e.stopPropagation();
+            handleAlertAction(alert.id, 'escalate');
+        }
+    }
+    className = "flex-1 px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700"
+        >
+        Escalate
+        </button>
+          )
+}
+
+{
+    alert.status === 'responding' && (
+        <button
+              onClick={
+        (e) => {
+            e.stopPropagation();
+            handleAlertAction(alert.id, 'resolve');
+        }
+    }
+    className = "flex-1 px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+        >
+        Resolve
+        </button>
+          )
+}
+</div>
+
+{/* Video Clip Link */ }
+{
+    alert.videoClipUrl && (
+        <div className="mt-2" >
+            <a
+              href={ alert.videoClipUrl }
+    target = "_blank"
+    rel = "noopener noreferrer"
+    className = "text-xs text-blue-600 hover:text-blue-800 underline"
+    onClick = {(e) => e.stopPropagation()
+}
+            >
+    View Video Clip →
+</a>
+    </div>
+        )}
+</div>
+    );
+  };
+
+return (
+    <div className= "bg-white rounded-lg shadow-sm border" >
+    {/* Alert Panel Header */ }
+    < div className = "flex items-center justify-between p-4 border-b" >
+        <h3 className="text-lg font-semibold text-gray-900" > Active Alerts </h3>
+
+            < div className = "flex items-center space-x-4" >
+                {/* Status Filter */ }
+                < select
+value = { filterStatus }
+onChange = {(e) => setFilterStatus(e.target.value)}
+className = "border border-gray-300 rounded px-2 py-1 text-sm"
+    >
+    <option value="active" > Active Only </option>
+        < option value = "all" > All Alerts </option>
+            < option value = "detected" > Detected </option>
+                < option value = "acknowledged" > Acknowledged </option>
+                    < option value = "responding" > Responding </option>
+                        < option value = "resolved" > Resolved </option>
+                            </select>
+
+{/* Severity Filter */ }
+<select
+            value={ filterSeverity }
+onChange = {(e) => setFilterSeverity(e.target.value)}
+className = "border border-gray-300 rounded px-2 py-1 text-sm"
+    >
+    <option value="all" > All Severities </option>
+        < option value = "critical" > Critical </option>
+            < option value = "high" > High </option>
+                < option value = "medium" > Medium </option>
+                    < option value = "low" > Low </option>
+                        </select>
+
+{/* Sort By */ }
+<select
+            value={ sortBy }
+onChange = {(e) => setSortBy(e.target.value as any)}
+className = "border border-gray-300 rounded px-2 py-1 text-sm"
+    >
+    <option value="timestamp" > Newest First </option>
+        < option value = "severity" > By Severity </option>
+            < option value = "response_time" > By Response Time </option>
+                </select>
+                </div>
+                </div>
+
+{/* Alert Statistics */ }
+<div className="flex items-center justify-between p-4 bg-gray-50 border-b" >
+    <div className="flex space-x-6 text-sm" >
+        <div>
+        <span className="text-gray-600" > Total: </span>
+            < span className = "ml-1 font-medium" > { fallEvents.length } </span>
+                </div>
+                < div >
+                <span className="text-gray-600" > Active: </span>
+                    < span className = "ml-1 font-medium text-red-600" >
+                        { fallEvents.filter(a => !['resolved', 'false_positive'].includes(a.status)).length }
+                        </span>
+                        </div>
+                        < div >
+                        <span className="text-gray-600" > Critical: </span>
+                            < span className = "ml-1 font-medium text-red-600" >
+                                { fallEvents.filter(a => a.severity === 'critical' && a.status !== 'resolved').length }
+                                </span>
+                                </div>
+                                < div >
+                                <span className="text-gray-600" > Response Rate: </span>
+                                    < span className = "ml-1 font-medium" >
+                                        { Math.round((fallEvents.filter(a => a.responseTime).length / fallEvents.length) * 100) || 0 } %
+                                        </span>
+                                        </div>
+                                        </div>
+
+{/* Quick Actions */ }
+<div className="flex space-x-2" >
+    <button className="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700" >
+        Emergency Broadcast
+            </button>
+            < button className = "px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700" >
+                Export Report
+                    </button>
+                    </div>
+                    </div>
+
+{/* Alert List */ }
+<div className="p-4" >
+    {
+        filteredAlerts.length > 0 ? (
+            <div className= "space-y-3 max-h-96 overflow-y-auto" >
+            {
+                filteredAlerts.map(alert => (
+                    <AlertCard key= { alert.id } alert = { alert } />
+            ))
+            }
+            </div>
+        ) : (
+                <div className="flex items-center justify-center h-32 text-gray-500" >
+            <div className="text-center" >
+            <div className="text-2xl mb-2" >✅</div>
+            < div > No alerts matching current filters </div>
+            </div>
+            </div>
+            )}
+</div>
+    </div>
+  );
+};
+
+// src/guardian-protect/components/ResponseDashboard.tsx
+import React, { useState, useEffect } from 'react';
+import { EmergencyResponse } from '../types';
+import { useEmergencyResponse } from '../hooks/useEmergencyResponse';
+import { useEventBus } from '@eversight/core-foundation/hooks';
+
+interface ResponseDashboardProps {
+    activeResponse?: string;
+    onResponseSelect: (responseId: string) => void;
+}
+
+export const ResponseDashboard: React.FC<ResponseDashboardProps> = ({
+    activeResponse,
+    onResponseSelect
+}) => {
+    const [viewMode, setViewMode] = useState<'active' | 'history' | 'team'>('active');
+    const [selectedTeam, setSelectedTeam] = useState<string>('all');
+
+    const {
+        activeResponses,
+        responseHistory,
+        responseTeams,
+        coordinateResponse,
+        updateResponseStatus,
+        assignResponder,
+        escalateResponse,
+        closeResponse
+    } = useEmergencyResponse();
+
+    const { emit } = useEventBus();
+
+    const handleResponseAction = async (responseId: string, action: string, data?: any) => {
+        try {
+            switch (action) {
+                case 'coordinate':
+                    await coordinateResponse(responseId, data);
+                    break;
+                case 'update_status':
+                    await updateResponseStatus(responseId, data.status);
+                    break;
+                case 'assign':
+                    await assignResponder(responseId, data.responderId);
+                    break;
+                case 'escalate':
+                    await escalateResponse(responseId);
+                    break;
+                case 'close':
+                    await closeResponse(responseId);
+                    break;
+            }
+
+            emit({
+                type: `emergency.response.${action}`,
+                source: 'guardian-protect',
+                payload: { responseId, ...data },
+                timestamp: new Date(),
+                priority: 'high'
+            });
+        } catch (error) {
+            console.error('Response action failed:', error);
+        }
+    };
+
+    const getResponseTypeIcon = (type: string) => {
+        switch (type) {
+            case 'fall': return '🚨';
+            case 'medical': return '🏥';
+            case 'fire': return '🔥';
+            case 'security': return '🔒';
+            case 'natural_disaster': return '🌪️';
+            default: return '⚠️';
+        }
+    };
+
+    const getPriorityColor = (priority: string) => {
+        switch (priority) {
+            case 'critical': return 'bg-red-600';
+            case 'high': return 'bg-orange-500';
+            case 'medium': return 'bg-yellow-500';
+            case 'low': return 'bg-blue-500';
+            default: return 'bg-gray-500';
+        }
+    };
+
+    const getStatusColor = (status: string) => {
+        switch (status) {
+            case 'initiated': return 'text-red-600';
+            case 'acknowledged': return 'text-yellow-600';
+            case 'en_route': return 'text-blue-600';
+            case 'on_scene': return 'text-purple-600';
+            case 'resolved': return 'text-green-600';
+            default: return 'text-gray-600';
+        }
+    };
+
+    const ResponseCard: React.FC<{ response: EmergencyResponse }> = ({ response }) => {
+        const [showDetails, setShowDetails] = useState(false);
+        const isActive = activeResponse === response.id;
+        const elapsedTime = Math.floor((Date.now() - new Date(response.timestamp).getTime()) / 1000);
+
+        return (
+            <div 
+        className= {`border rounded-lg p-4 transition-all cursor-pointer ${isActive ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                }`
+    }
+    onClick = {() => onResponseSelect(response.id)}
+      >
+    {/* Response Header */ }
+    < div className = "flex items-center justify-between mb-3" >
+        <div className="flex items-center space-x-3" >
+            <span className="text-2xl" > { getResponseTypeIcon(response.type) } </span>
+                < div >
+                <div className="flex items-center space-x-2" >
+                    <span className="font-semibold" >#{ response.id.slice(-6) } </span>
+                        < span className = {`w-2 h-2 rounded-full ${getPriorityColor(response.priority)}`}> </span>
+                            < span className = "text-sm font-medium capitalize" > { response.type } </span>
+                                </div>
+                                < div className = {`text-sm font-medium ${getStatusColor(response.status)}`}>
+                                    { response.status.replace('_', ' ').toUpperCase() }
+                                    </div>
+                                    </div>
+                                    </div>
+
+                                    < div className = "text-right" >
+                                        <div className="text-sm text-gray-600" >
+                                            { Math.floor(elapsedTime / 60) }: { (elapsedTime % 60).toString().padStart(2, '0') }
+</div>
+    < div className = "text-xs text-gray-500" >
+        { new Date(response.timestamp).toLocaleTimeString() }
+        </div>
+        </div>
+        </div>
+
+{/* Location Info */ }
+<div className="mb-3 p-2 bg-gray-50 rounded" >
+    <div className="flex items-center justify-between text-sm" >
+        <span className="text-gray-600" > Location: </span>
+            < span className = "font-medium" >
+                Floor { response.location.floor }
+{ response.location.roomId && `, Room ${response.location.roomId}` }
+</span>
+    </div>
+    < div className = "flex items-center justify-between text-sm" >
+        <span className="text-gray-600" > Coordinates: </span>
+            < span className = "font-medium" >
+                ({ response.location.coordinates.x }, { response.location.coordinates.y })
+                </span>
+                </div>
+                </div>
+
+{/* Response Team */ }
+<div className="mb-3" >
+    <div className="flex items-center justify-between text-sm mb-1" >
+        <span className="text-gray-600" > Response Team: </span>
+            < span className = "text-blue-600 cursor-pointer" onClick = {(e) => {
+    e.stopPropagation();
+    setShowDetails(!showDetails);
+}}>
+    { response.respondersAssigned.length } assigned
+        </span>
+        </div>
+
+{
+    showDetails && (
+        <div className="space-y-1" >
+        {
+            response.respondersAssigned.map((responderId, index) => (
+                <div key= { index } className = "flex items-center justify-between text-xs bg-white p-2 rounded" >
+                <span>{ responderId } </span>
+                < button
+                    onClick = {(e) => {
+                e.stopPropagation();
+                // Remove responder logic
+            }}
+    className = "text-red-500 hover:text-red-700"
+        >
+        Remove
+        </button>
+        </div>
+              ))
+}
+<button
+                onClick={
+    (e) => {
+        e.stopPropagation();
+        // Add responder logic
+    }
+}
+className = "w-full text-xs bg-blue-600 text-white py-1 rounded hover:bg-blue-700"
+    >
+    + Add Responder
+        </button>
+        </div>
+          )}
+</div>
+
+{/* ETA and Progress */ }
+<div className="mb-4" >
+    <div className="flex items-center justify-between text-sm mb-2" >
+        <span className="text-gray-600" > ETA: </span>
+            < span className = "font-medium" > { response.estimatedResponseTime }s </span>
+                </div>
+
+{/* Progress Bar */ }
+<div className="w-full bg-gray-200 rounded-full h-2" >
+    <div 
+              className={
+    `h-2 rounded-full transition-all ${response.status === 'resolved' ? 'bg-green-500' :
+        response.status === 'on_scene' ? 'bg-purple-500' :
+            response.status === 'en_route' ? 'bg-blue-500' :
+                response.status === 'acknowledged' ? 'bg-yellow-500' :
+                    'bg-red-500'
+    }`
+}
+style = {{
+    width: `${response.status === 'resolved' ? 100 :
+            response.status === 'on_scene' ? 80 :
+                response.status === 'en_route' ? 60 :
+                    response.status === 'acknowledged' ? 40 : 20
+        }%`
+}}
+            > </div>
+    </div>
+    </div>
+
+{/* Action Buttons */ }
+<div className="flex space-x-2" >
+{
+    response.status === 'initiated' && (
+        <button
+              onClick={
+    (e) => {
+        e.stopPropagation();
+        handleResponseAction(response.id, 'update_status', { status: 'acknowledged' });
+    }
+}
+className = "flex-1 px-3 py-1 bg-yellow-600 text-white text-xs rounded hover:bg-yellow-700"
+    >
+    Acknowledge
+    </button>
+          )}
+
+{
+    response.status === 'acknowledged' && (
+        <button
+              onClick={
+        (e) => {
+            e.stopPropagation();
+            handleResponseAction(response.id, 'update_status', { status: 'en_route' });
+        }
+    }
+    className = "flex-1 px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700"
+        >
+        Dispatch
+        </button>
+          )
+}
+
+{
+    response.status === 'en_route' && (
+        <button
+              onClick={
+        (e) => {
+            e.stopPropagation();
+            handleResponseAction(response.id, 'update_status', { status: 'on_scene' });
+        }
+    }
+    className = "flex-1 px-3 py-1 bg-purple-600 text-white text-xs rounded hover:bg-purple-700"
+        >
+        On Scene
+            </button>
+          )
+}
+
+{
+    response.status === 'on_scene' && (
+        <button
+              onClick={
+        (e) => {
+            e.stopPropagation();
+            handleResponseAction(response.id, 'close');
+        }
+    }
+    className = "flex-1 px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+        >
+        Resolve
+        </button>
+          )
+}
+
+{
+    !['resolved'].includes(response.status) && (
+        <button
+              onClick={
+        (e) => {
+            e.stopPropagation();
+            handleResponseAction(response.id, 'escalate');
+        }
+    }
+    className = "px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700"
+        >
+        Escalate
+        </button>
+          )
+}
+</div>
+
+{/* Escalation Level */ }
+{
+    response.escalationLevel > 0 && (
+        <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded" >
+            <div className="text-xs text-red-700" >
+                Escalation Level: { response.escalationLevel }
+    </div>
+        </div>
+        )
+}
+</div>
+    );
+  };
+
+const TeamMemberCard: React.FC<{ member: any }> = ({ member }) => (
+    <div className= "border rounded-lg p-3" >
+    <div className="flex items-center justify-between mb-2" >
+        <div className="flex items-center space-x-2" >
+            <div className={
+                `w-3 h-3 rounded-full ${member.status === 'available' ? 'bg-green-500' :
+                    member.status === 'busy' ? 'bg-yellow-500' :
+                        member.status === 'offline' ? 'bg-gray-500' : 'bg-red-500'
+                }`
+}> </div>
+    < span className = "font-medium" > { member.name } </span>
+        </div>
+        < span className = "text-xs text-gray-500" > { member.role } </span>
+            </div>
+
+            < div className = "text-xs text-gray-600 space-y-1" >
+                <div>Location: { member.currentLocation } </div>
+                    < div > Active Responses: { member.activeResponses } </div>
+{ member.eta && <div>ETA: { member.eta } </div> }
+</div>
+
+{
+    member.status === 'available' && (
+        <button className="w-full mt-2 px-2 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700" >
+            Assign to Response
+                </button>
+      )
+}
+</div>
+  );
+
+return (
+    <div className= "bg-white rounded-lg shadow-sm border" >
+    {/* Dashboard Header */ }
+    < div className = "flex items-center justify-between p-4 border-b" >
+        <h3 className="text-lg font-semibold text-gray-900" > Emergency Response </h3>
+
+            < div className = "flex items-center space-x-4" >
+                {/* View Mode Tabs */ }
+                < div className = "flex space-x-1 bg-gray-100 rounded p-1" >
+                {
+                    ['active', 'history', 'team'].map(mode => (
+                        <button
+                key= { mode }
+                onClick = {() => setViewMode(mode as any)}
+className = {`px-3 py-1 text-sm rounded capitalize ${viewMode === mode
+        ? 'bg-white text-gray-900 shadow-sm'
+        : 'text-gray-600 hover:text-gray-900'
+    }`}
+              >
+    { mode }
+    </button>
+            ))}
+</div>
+
+{/* Emergency Actions */ }
+<div className="flex space-x-2" >
+    <button className="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700" >
+        Emergency Broadcast
+            </button>
+            < button className = "px-3 py-1 bg-orange-600 text-white text-sm rounded hover:bg-orange-700" >
+                Facility Lockdown
+                    </button>
+                    </div>
+                    </div>
+                    </div>
+
+{/* Dashboard Content */ }
+<div className="p-4" >
+    { viewMode === 'active' && (
+        <div>
+        {/* Active Response Statistics */ }
+        < div className = "grid grid-cols-4 gap-4 mb-6" >
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3" >
+                <div className="text-red-600 text-2xl font-bold" >
+                    { activeResponses.filter(r => r.priority === 'critical').length }
+                    </div>
+                    < div className = "text-red-700 text-sm" > Critical </div>
+                        </div>
+                        < div className = "bg-orange-50 border border-orange-200 rounded-lg p-3" >
+                            <div className="text-orange-600 text-2xl font-bold" >
+                                { activeResponses.filter(r => r.priority === 'high').length }
+                                </div>
+                                < div className = "text-orange-700 text-sm" > High Priority </div>
+                                    </div>
+                                    < div className = "bg-blue-50 border border-blue-200 rounded-lg p-3" >
+                                        <div className="text-blue-600 text-2xl font-bold" >
+                                            { activeResponses.filter(r => r.status === 'en_route').length }
+                                            </div>
+                                            < div className = "text-blue-700 text-sm" > En Route </div>
+                                                </div>
+                                                < div className = "bg-green-50 border border-green-200 rounded-lg p-3" >
+                                                    <div className="text-green-600 text-2xl font-bold" >
+                                                        { activeResponses.filter(r => r.status === 'on_scene').length }
+                                                        </div>
+                                                        < div className = "text-green-700 text-sm" > On Scene </div>
+                                                            </div>
+                                                            </div>
+
+{/* Active Responses List */ }
+<div className="space-y-4" >
+    {
+        activeResponses.length > 0 ? (
+            activeResponses.map(response => (
+                <ResponseCard key= { response.id } response = { response } />
+                ))
+              ) : (
+                    <div className="flex items-center justify-center h-32 text-gray-500" >
+                <div className="text-center" >
+                <div className="text-2xl mb-2" >✅</div>
+                < div > No active emergency responses </div>
+                </div>
+                </div>
+                )}
+</div>
+    </div>
+        )}
+
+{
+    viewMode === 'history' && (
+        <div>
+        {/* History Filters */ }
+        < div className = "flex items-center space-x-4 mb-4" >
+            <select className="border border-gray-300 rounded px-3 py-1 text-sm" >
+                <option value="today" > Today </option>
+                    < option value = "week" > This Week </option>
+                        < option value = "month" > This Month </option>
+                            </select>
+                            < select className = "border border-gray-300 rounded px-3 py-1 text-sm" >
+                                <option value="all" > All Types </option>
+                                    < option value = "fall" > Fall Incidents </option>
+                                        < option value = "medical" > Medical </option>
+                                            < option value = "fire" > Fire </option>
+                                                < option value = "security" > Security </option>
+                                                    </select>
+                                                    </div>
+
+    {/* Response History */ }
+    <div className="space-y-3" >
+    {
+        responseHistory.slice(0, 10).map(response => (
+            <div key= { response.id } className = "border rounded-lg p-3 bg-gray-50" >
+            <div className="flex items-center justify-between" >
+        <div className="flex items-center space-x-3" >
+        <span className="text-lg" > { getResponseTypeIcon(response.type)
+    } </span>
+        < div >
+        <div className="font-medium" >#{ response.id.slice(-6) } - { response.type } </div>
+            < div className = "text-sm text-gray-600" >
+                { new Date(response.timestamp).toLocaleString() }
+                </div>
+                </div>
+                </div>
+                < div className = "text-right" >
+                    <div className={ `text-sm font-medium ${getStatusColor(response.status)}` }>
+                        { response.status.toUpperCase() }
+                        </div>
+                        < div className = "text-xs text-gray-500" >
+                            Response Time: { response.responseTime || 'N/A' } s
+                                </div>
+                                </div>
+                                </div>
+                                </div>
+              ))
+}
+</div>
+    </div>
+        )}
+
+{
+    viewMode === 'team' && (
+        <div>
+        {/* Team Filters */ }
+        < div className = "flex items-center space-x-4 mb-4" >
+            <select
+                value={ selectedTeam }
+    onChange = {(e) => setSelectedTeam(e.target.value)
+}
+className = "border border-gray-300 rounded px-3 py-1 text-sm"
+    >
+    <option value="all" > All Teams </option>
+        < option value = "medical" > Medical Team </option>
+            < option value = "security" > Security Team </option>
+                < option value = "maintenance" > Maintenance </option>
+                    < option value = "management" > Management </option>
+                        </select>
+                        </div>
+
+{/* Team Members Grid */ }
+<div className="grid grid-cols-2 lg:grid-cols-3 gap-4" >
+{
+    responseTeams
+                .filter(member => selectedTeam === 'all' || member.team === selectedTeam)
+        .map(member => (
+            <TeamMemberCard key= { member.id } member = { member } />
+                ))
+}
+    </div>
+
+{/* Team Statistics */ }
+<div className="mt-6 grid grid-cols-4 gap-4" >
+    <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-center" >
+        <div className="text-green-600 text-xl font-bold" >
+            { responseTeams.filter(m => m.status === 'available').length }
+            </div>
+            < div className = "text-green-700 text-sm" > Available </div>
+                </div>
+                < div className = "bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center" >
+                    <div className="text-yellow-600 text-xl font-bold" >
+                        { responseTeams.filter(m => m.status === 'busy').length }
+                        </div>
+                        < div className = "text-yellow-700 text-sm" > Busy </div>
+                            </div>
+                            < div className = "bg-red-50 border border-red-200 rounded-lg p-3 text-center" >
+                                <div className="text-red-600 text-xl font-bold" >
+                                    { responseTeams.filter(m => m.status === 'emergency').length }
+                                    </div>
+                                    < div className = "text-red-700 text-sm" > Emergency </div>
+                                        </div>
+                                        < div className = "bg-gray-50 border border-gray-200 rounded-lg p-3 text-center" >
+                                            <div className="text-gray-600 text-xl font-bold" >
+                                                { responseTeams.filter(m => m.status === 'offline').length }
+                                                </div>
+                                                < div className = "text-gray-700 text-sm" > Offline </div>
+                                                    </div>
+                                                    </div>
+                                                    </div>
+        )}
+</div>
+    </div>
+  );
+};
+
+// src/guardian-protect/services/fall-detection.ts
+import { FallDetectionEvent, HeatMapData, VideoFeed } from '../types';
+import { EventBusService } from '@eversight/core-foundation/services';
+import { logger } from '@eversight/core-foundation/utils';
+
+export class FallDetectionService {
+    private eventBus: EventBusService;
+    private activeDetectors: Map<string, Worker> = new Map();
+    private confidenceThreshold: number = 0.7;
+    private processingQueue: FallDetectionEvent[] = [];
+
+    constructor(eventBus: EventBusService) {
+        this.eventBus = eventBus;
+        this.initializeDetectors();
+    }
+
+    private async initializeDetectors() {
+        try {
+            // Initialize fall detection workers for each camera
+            const cameras = await this.getCameraList();
+
+            for (const camera of cameras) {
+                if (camera.capabilities.some(c => c.type === 'fall_detection' && c.enabled)) {
+                    await this.startDetectionWorker(camera.id);
+                }
+            }
+
+            logger.info('Fall detection service initialized', {
+                activeDetectors: this.activeDetectors.size
+            });
+        } catch (error) {
+            logger.error('Failed to initialize fall detection service', error);
+            throw error;
+        }
+    }
+
+    private async startDetectionWorker(cameraId: string): Promise<void> {
+        try {
+            const worker = new Worker(
+                new URL('../workers/video-processor.worker.ts', import.meta.url),
+                { type: 'module' }
+            );
+
+            worker.onmessage = (event) => {
+                this.handleDetectionResult(cameraId, event.data);
+            };
+
+            worker.onerror = (error) => {
+                logger.error('Fall detection worker error', { cameraId, error });
+                this.restartDetectionWorker(cameraId);
+            };
+
+            // Configure worker
+            worker.postMessage({
+                type: 'configure',
+                config: {
+                    cameraId,
+                    confidenceThreshold: this.confidenceThreshold,
+                    detectionTypes: ['fall', 'slip', 'collapse'],
+                    processingInterval: 100, // ms
+                    frameSkip: 2 // Process every 2nd frame for performance
+                }
+            });
+
+            this.activeDetectors.set(cameraId, worker);
+
+            logger.info('Fall detection worker started', { cameraId });
+        } catch (error) {
+            logger.error('Failed to start detection worker', { cameraId, error });
+            throw error;
+        }
+    }
+
+    private async handleDetectionResult(cameraId: string, result: any): Promise<void> {
+        try {
+            if (result.type === 'fall_detected' && result.confidence >= this.confidenceThreshold) {
+                const event: FallDetectionEvent = {
+                    id: this.generateEventId(),
+                    cameraId,
+                    roomId: await this.getRoomIdFromCamera(cameraId),
+                    residentId: result.residentId,
+                    timestamp: new Date(),
+                    confidence: result.confidence,
+                    coordinates: result.coordinates,
+                    severity: this.calculateSeverity(result),
+                    status: 'detected',
+                    videoClipUrl: await this.saveVideoClip(cameraId, result.timestamp)
+                };
+
+                await this.processFallEvent(event);
+            }
+        } catch (error) {
+            logger.error('Failed to handle detection result', { cameraId, result, error });
+        }
+    }
+
+    private calculateSeverity(result: any): 'low' | 'medium' | 'high' | 'critical' {
+        const { confidence, fallType, impact, duration } = result;
+
+        // Critical: High confidence + hard impact + vulnerable resident
+        if (confidence >= 0.95 && impact === 'high') {
+            return 'critical';
+        }
+
+        // High: Good confidence + significant impact
+        if (confidence >= 0.85 && (impact === 'medium' || impact === 'high')) {
+            return 'high';
+        }
+
+        // Medium: Decent confidence or moderate indicators
+        if (confidence >= 0.75 || impact === 'medium') {
+            return 'medium';
+        }
+
+        // Low: Lower confidence but still above threshold
+        return 'low';
+    }
+
+    private async processFallEvent(event: FallDetectionEvent): Promise<void> {
+        try {
+            // Add to processing queue
+            this.processingQueue.push(event);
+
+            // Store in database
+            await this.storeFallEvent(event);
+
+            // Emit event for other modules
+            this.eventBus.emit({
+                type: 'guardian.fall.detected',
+                source: 'guardian-protect',
+                payload: event,
+                timestamp: new Date(),
+                priority: event.severity === 'critical' ? 'critical' : 'high'
+            });
+
+            // Trigger immediate response for critical events
+            if (event.severity === 'critical') {
+                await this.triggerEmergencyResponse(event);
+            }
+
+            // Update heat map data
+            await this.updateHeatMapData(event);
+
+            logger.info('Fall event processed', {
+                eventId: event.id,
+                severity: event.severity
+            });
+        } catch (error) {
+            logger.error('Failed to process fall event', { event, error });
+            throw error;
+        }
+    }
+
+    private async triggerEmergencyResponse(event: FallDetectionEvent): Promise<void> {
+        try {
+            this.eventBus.emit({
+                type: 'emergency.response.trigger',
+                source: 'guardian-protect',
+                payload: {
+                    type: 'fall',
+                    priority: 'critical',
+                    location: {
+                        floor: await this.getFloorFromRoom(event.roomId),
+                        roomId: event.roomId,
+                        coordinates: event.coordinates
+                    },
+                    fallEventId: event.id
+                },
+                timestamp: new Date(),
+                priority: 'critical'
+            });
+        } catch (error) {
+            logger.error('Failed to trigger emergency response', { event, error });
+        }
+    }
+
+    public async acknowledgeAlert(eventId: string): Promise<void> {
+        try {
+            await this.updateEventStatus(eventId, 'acknowledged');
+
+            this.eventBus.emit({
+                type: 'guardian.alert.acknowledged',
+                source: 'guardian-protect',
+                payload: { eventId },
+                timestamp: new Date(),
+                priority: 'medium'
+            });
+        } catch (error) {
+            logger.error('Failed to acknowledge alert', { eventId, error });
+            throw error;
+        }
+    }
+
+    public async resolveAlert(eventId: string): Promise<void> {
+        try {
+            const responseTime = await this.calculateResponseTime(eventId);
+
+            await this.updateEventStatus(eventId, 'resolved', { responseTime });
+
+            this.eventBus.emit({
+                type: 'guardian.alert.resolved',
+                source: 'guardian-protect',
+                payload: { eventId, responseTime },
+                timestamp: new Date(),
+                priority: 'medium'
+            });
+        } catch (error) {
+            logger.error('Failed to resolve alert', { eventId, error });
+            throw error;
+        }
+    }
+
+    public async markFalsePositive(eventId: string): Promise<void> {
+        try {
+            await this.updateEventStatus(eventId, 'false_positive');
+
+            // Update ML model with false positive feedback
+            await this.updateMLModel(eventId, 'false_positive');
+
+            this.eventBus.emit({
+                type: 'guardian.alert.false_positive',
+                source: 'guardian-protect',
+                payload: { eventId },
+                timestamp: new Date(),
+                priority: 'low'
+            });
+        } catch (error) {
+            logger.error('Failed to mark false positive', { eventId, error });
+            throw error;
+        }
+    }
+
+    public async getHeatMapData(floor: number, period: string): Promise<HeatMapData | null> {
+        try {
+            // Implementation for retrieving heat map data
+            return await this.queryHeatMapData(floor, period);
+        } catch (error) {
+            logger.error('Failed to get heat map data', { floor, period, error });
+            return null;
+        }
+    }
+
+    // Helper methods (simplified implementations)
+    private generateEventId(): string {
+        return `fall_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    private async getCameraList(): Promise<any[]> {
+        // Implementation to fetch camera list
+        return [];
+    }
+
+    private async getRoomIdFromCamera(cameraId: string): Promise<string | undefined> {
+        // Implementation to map camera to room
+        return undefined;
+    }
+
+    private async getFloorFromRoom(roomId?: string): Promise<number> {
+        // Implementation to get floor from room
+        return 1;
+    }
+
+    private async saveVideoClip(cameraId: string, timestamp: Date): Promise<string> {
+        // Implementation to save video clip
+        return `video_clips/${cameraId}_${timestamp.getTime()}.mp4`;
+    }
+
+    private async storeFallEvent(event: FallDetectionEvent): Promise<void> {
+        // Implementation to store event in database
+    }
+
+    private async updateEventStatus(eventId: string, status: string, data?: any): Promise<void> {
+        // Implementation to update event status in database
+    }
+
+    private async calculateResponseTime(eventId: string): Promise<number> {
+        // Implementation to calculate response time
+        return 0;
+    }
+
+    private async updateMLModel(eventId: string, feedback: string): Promise<void> {
+        // Implementation to update ML model with feedback
+    }
+
+    private async updateHeatMapData(event: FallDetectionEvent): Promise<void> {
+        // Implementation to update heat map data
+    }
+
+    private async queryHeatMapData(floor: number, period: string): Promise<HeatMapData | null> {
+        // Implementation to query heat map data
+        return null;
+    }
+
+    private async restartDetectionWorker(cameraId: string): Promise<void> {
+        const worker = this.activeDetectors.get(cameraId);
+        if (worker) {
+            worker.terminate();
+            this.activeDetectors.delete(cameraId);
+        }
+
+        // Restart after delay
+        setTimeout(() => {
+            this.startDetectionWorker(cameraId);
+        }, 5000);
+    }
+
+    public async shutdown(): Promise<void> {
+        for (const [cameraId, worker] of this.activeDetectors) {
+            worker.terminate();
+        }
+        this.activeDetectors.clear();
+        logger.info('Fall detection service shutdown');
+    }
+}
+
+// src/guardian-protect/services/video-stream.ts
+import { VideoFeed, CameraPosition } from '../types';
+import { logger } from '@eversight/core-foundation/utils';
+
+export class VideoStreamService {
+    private activeStreams: Map<string, MediaStream> = new Map();
+    private streamQualities: Map<string, string> = new Map();
+    private recordingSessions: Map<string, MediaRecorder> = new Map();
+    private reconnectAttempts: Map<string, number> = new Map();
+
+    constructor() {
+        this.initializeStreamManager();
+    }
+
+    private initializeStreamManager(): void {
+        // Set up stream health monitoring
+        setInterval(() => {
+            this.monitorStreamHealth();
+        }, 10000); // Check every 10 seconds
+    }
+
+    public async startStream(cameraId: string, streamUrl: string): Promise<VideoFeed> {
+        try {
+            const response = await fetch(streamUrl);
+            if (!response.ok) {
+                throw new Error(`Stream not available: ${response.status}`);
+            }
+
+            const stream = await this.createMediaStream(streamUrl);
+            this.activeStreams.set(cameraId, stream);
+            this.streamQualities.set(cameraId, 'medium');
+
+            const videoFeed: VideoFeed = {
+                cameraId,
+                streamUrl,
+                isLive: true,
+                quality: 'medium',
+                latency: await this.measureLatency(streamUrl),
+                lastUpdate: new Date()
+            };
+
+            logger.info('Video stream started', { cameraId, streamUrl });
+            return videoFeed;
+        } catch (error) {
+            logger.error('Failed to start video stream', { cameraId, streamUrl, error });
+            throw error;
+        }
+    }
+
+    public async stopStream(cameraId: string): Promise<void> {
+        try {
+            const stream = this.activeStreams.get(cameraId);
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                this.activeStreams.delete(cameraId);
+            }
+
+            const recording = this.recordingSessions.get(cameraId);
+            if (recording) {
+                recording.stop();
+                this.recordingSessions.delete(cameraId);
+            }
+
+            this.streamQualities.delete(cameraId);
+            this.reconnectAttempts.delete(cameraId);
+
+            logger.info('Video stream stopped', { cameraId });
+        } catch (error) {
+            logger.error('Failed to stop video stream', { cameraId, error });
+        }
+    }
+
+    public async adjustQuality(cameraId: string, quality: string): Promise<void> {
+        try {
+            this.streamQualities.set(cameraId, quality);
+
+            // Restart stream with new quality if active
+            const stream = this.activeStreams.get(cameraId);
+            if (stream) {
+                const cameraInfo = await this.getCameraInfo(cameraId);
+                await this.stopStream(cameraId);
+                await this.startStream(cameraId, this.getQualityStreamUrl(cameraInfo.streamUrl, quality));
+            }
+
+            logger.info('Stream quality adjusted', { cameraId, quality });
+        } catch (error) {
+            logger.error('Failed to adjust stream quality', { cameraId, quality, error });
+        }
+    }
+
+    public async startRecording(cameraId: string): Promise<void> {
+        try {
+            const stream = this.activeStreams.get(cameraId);
+            if (!stream) {
+                throw new Error('Stream not active');
+            }
+
+            const mediaRecorder = new MediaRecorder(stream, {
+                mimeType: 'video/webm;codecs=vp9',
+                videoBitsPerSecond: 2500000
+            });
+
+            const chunks: Blob[] = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    chunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = async () => {
+                const blob = new Blob(chunks, { type: 'video/webm' });
+                await this.saveRecording(cameraId, blob);
+            };
+
+            mediaRecorder.start(1000); // Collect data every second
+            this.recordingSessions.set(cameraId, mediaRecorder);
+
+            logger.info('Recording started', { cameraId });
+        } catch (error) {
+            logger.error('Failed to start recording', { cameraId, error });
+            throw error;
+        }
+    }
+
+    public async stopRecording(cameraId: string): Promise<string | null> {
+        try {
+            const mediaRecorder = this.recordingSessions.get(cameraId);
+            if (!mediaRecorder) {
+                return null;
+            }
+
+            return new Promise((resolve, reject) => {
+                mediaRecorder.onstop = async () => {
+                    try {
+                        const recordingUrl = await this.finalizeRecording(cameraId);
+                        this.recordingSessions.delete(cameraId);
+                        resolve(recordingUrl);
+                    } catch (error) {
+                        reject(error);
+                    }
+                };
+
+                mediaRecorder.stop();
+            });
+        } catch (error) {
+            logger.error('Failed to stop recording', { cameraId, error });
+            return null;
+        }
+    }
+
+    public getActiveStreams(): VideoFeed[] {
+        const feeds: VideoFeed[] = [];
+
+        for (const [cameraId, stream] of this.activeStreams) {
+            feeds.push({
+                cameraId,
+                streamUrl: this.getStreamUrl(cameraId),
+                isLive: stream.active,
+                quality: this.streamQualities.get(cameraId) as any || 'medium',
+                latency: this.getCachedLatency(cameraId),
+                lastUpdate: new Date()
+            });
+        }
+
+        return feeds;
+    }
+
+    public isRecording(cameraId: string): boolean {
+        const recorder = this.recordingSessions.get(cameraId);
+        return recorder?.state === 'recording';
+    }
+
+    private async createMediaStream(streamUrl: string): Promise<MediaStream> {
+        // Implementation would depend on the specific camera system
+        // This is a simplified version
+        return new MediaStream();
+    }
+
+    private async measureLatency(streamUrl: string): Promise<number> {
+        try {
+            const startTime = performance.now();
+            await fetch(streamUrl, { method: 'HEAD' });
+            return Math.round(performance.now() - startTime);
+        } catch (error) {
+            return 0;
+        }
+    }
+
+    private async monitorStreamHealth(): Promise<void> {
+        for (const [cameraId, stream] of this.activeStreams) {
+            if (!stream.active) {
+                await this.attemptReconnection(cameraId);
+            }
+        }
+    }
+
+    private async attemptReconnection(cameraId: string): Promise<void> {
+        const attempts = this.reconnectAttempts.get(cameraId) || 0;
+
+        if (attempts >= 5) {
+            logger.warn('Max reconnection attempts reached', { cameraId });
+            return;
+        }
+
+        try {
+            const cameraInfo = await this.getCameraInfo(cameraId);
+            await this.stopStream(cameraId);
+            await this.startStream(cameraId, cameraInfo.streamUrl);
+
+            this.reconnectAttempts.delete(cameraId);
+            logger.info('Stream reconnected successfully', { cameraId });
+        } catch (error) {
+            this.reconnectAttempts.set(cameraId, attempts + 1);
+            logger.error('Stream reconnection failed', { cameraId, attempts: attempts + 1, error });
+        }
+    }
+
+    private getQualityStreamUrl(baseUrl: string, quality: string): string {
+        // Implementation to modify URL for different qualities
+        const qualityParams = {
+            low: 'resolution=480p&bitrate=500k',
+            medium: 'resolution=720p&bitrate=1500k',
+            high: 'resolution=1080p&bitrate=3000k',
+            ultra: 'resolution=4k&bitrate=8000k'
+        };
+
+        const separator = baseUrl.includes('?') ? '&' : '?';
+        return `${baseUrl}${separator}${qualityParams[quality as keyof typeof qualityParams]}`;
+    }
+
+    private async saveRecording(cameraId: string, blob: Blob): Promise<void> {
+        // Implementation to save recording to storage
+        const timestamp = new Date().toISOString();
+        const filename = `recording_${cameraId}_${timestamp}.webm`;
+
+        // Save to file system or cloud storage
+        logger.info('Recording saved', { cameraId, filename, size: blob.size });
+    }
+
+    private async finalizeRecording(cameraId: string): Promise<string> {
+        // Return URL to the saved recording
+        const timestamp = new Date().toISOString();
+        return `recordings/recording_${cameraId}_${timestamp}.webm`;
+    }
+
+    private async getCameraInfo(cameraId: string): Promise<any> {
+        // Implementation to get camera information
+        return { streamUrl: `rtmp://camera-server/${cameraId}` };
+    }
+
+    private getStreamUrl(cameraId: string): string {
+        // Implementation to get stream URL for camera
+        return `rtmp://camera-server/${cameraId}`;
+    }
+
+    private getCachedLatency(cameraId: string): number {
+        // Return cached latency measurement
+        return 50; // Placeholder
+    }
+}
+
+// src/guardian-protect/services/emergency-response.ts
+import { EmergencyResponse } from '../types';
+import { EventBusService } from '@eversight/core-foundation/services';
+import { logger } from '@eversight/core-foundation/utils';
+
+export class EmergencyResponseService {
+    private eventBus: EventBusService;
+    private activeResponses: Map<string, EmergencyResponse> = new Map();
+    private responseTeams: Map<string, any> = new Map();
+
+    constructor(eventBus: EventBusService) {
+        this.eventBus = eventBus;
+        this.initializeResponseService();
+    }
+
+    private initializeResponseService(): void {
+        // Listen for emergency events
+        this.eventBus.on('emergency.response.trigger', this.handleEmergencyTrigger.bind(this));
+        this.eventBus.on('guardian.fall.detected', this.handleFallDetection.bind(this));
+
+        // Initialize response teams
+        this.loadResponseTeams();
+    }
+
+    private async handleEmergencyTrigger(event: any): Promise<void> {
+        try {
+            const response = await this.createEmergencyResponse(event.payload);
+            await this.initiateResponse(response);
+        } catch (error) {
+            logger.error('Failed to handle emergency trigger', { event, error });
+        }
+    }
+
+    private async handleFallDetection(event: any): Promise<void> {
+        try {
+            if (event.payload.severity === 'critical') {
+                const response = await this.createEmergencyResponse({
+                    type: 'fall',
+                    priority: 'critical',
+                    location: {
+                        floor: await this.getFloorFromRoom(event.payload.roomId),
+                        roomId: event.payload.roomId,
+                        coordinates: event.payload.coordinates
+                    },
+                    fallEventId: event.payload.id
+                });
+
+                await this.initiateResponse(response);
+            }
+        } catch (error) {
+            logger.error('Failed to handle fall detection', { event, error });
+        }
+    }
+
+    public async createEmergencyResponse(data: any): Promise<EmergencyResponse> {
+        const response: EmergencyResponse = {
+            id: this.generateResponseId(),
+            type: data.type,
+            priority: data.priority,
+            location: data.location,
+            timestamp: new Date(),
+            respondersAssigned: [],
+            estimatedResponseTime: this.calculateEstimatedResponseTime(data),
+            status: 'initiated',
+            escalationLevel: 0
+        };
+
+        this.activeResponses.set(response.id, response);
+
+        logger.info('Emergency response created', { responseId: response.id, type: data.type });
+        return response;
+    }
+
+    public async initiateResponse(response: EmergencyResponse): Promise<void> {
+        try {
+            // Auto-assign available responders
+            const availableResponders = await this.getAvailableResponders(response.type, response.priority);
+            const assignedResponders = availableResponders.slice(0, this.getRequiredResponderCount(response));
+
+            response.respondersAssigned = assignedResponders.map(r => r.id);
+            response.status = 'acknowledged';
+
+            // Notify responders
+            for (const responder of assignedResponders) {
+                await this.notifyResponder(responder, response);
+            }
+
+            // Update response in storage
+            this.activeResponses.set(response.id, response);
+
+            // Emit event
+            this.eventBus.emit({
+                type: 'emergency.response.initiated',
+                source: 'guardian-protect',
+                payload: response,
+                timestamp: new Date(),
+                priority: response.priority as any
+            });
+
+            logger.info('Emergency response initiated', {
+                responseId: response.id,
+                responders: response.respondersAssigned.length
+            });
+        } catch (error) {
+            logger.error('Failed to initiate emergency response', { response, error });
+            throw error;
+        }
+    }
+
+    public async updateResponseStatus(responseId: string, status: string): Promise<void> {
+        try {
+            const response = this.activeResponses.get(responseId);
+            if (!response) {
+                throw new Error('Response not found');
+            }
+
+            response.status = status as any;
+
+            // Update timestamps based on status
+            if (status === 'resolved') {
+                const duration = Date.now() - response.timestamp.getTime();
+                response.responseTime = Math.round(duration / 1000);
+            }
+
+            this.activeResponses.set(responseId, response);
+
+            // Emit status update event
+            this.eventBus.emit({
+                type: 'emergency.response.status_updated',
+                source: 'guardian-protect',
+                payload: { responseId, status, response },
+                timestamp: new Date(),
+                priority: 'medium'
+            });
+
+            logger.info('Response status updated', { responseId, status });
+        } catch (error) {
+            logger.error('Failed to update response status', { responseId, status, error });
+            throw error;
+        }
+    }
+
+    public async assignResponder(responseId: string, responderId: string): Promise<void> {
+        try {
+            const response = this.activeResponses.get(responseId);
+            if (!response) {
+                throw new Error('Response not found');
+            }
+
+            if (!response.respondersAssigned.includes(responderId)) {
+                response.respondersAssigned.push(responderId);
+                this.activeResponses.set(responseId, response);
+
+                // Notify the new responder
+                const responder = await this.getResponderInfo(responderId);
+                await this.notifyResponder(responder, response);
+
+                logger.info('Responder assigned', { responseId, responderId });
+            }
+        } catch (error) {
+            logger.error('Failed to assign responder', { responseId, responderId, error });
+            throw error;
+        }
+    }
+
+    public async escalateResponse(responseId: string): Promise<void> {
+        try {
+            const response = this.activeResponses.get(responseId);
+            if (!response) {
+                throw new Error('Response not found');
+            }
+
+            response.escalationLevel += 1;
+            response.priority = this.escalatePriority(response.priority);
+
+            // Assign additional responders for escalated response
+            const additionalResponders = await this.getEscalationResponders(response);
+            for (const responder of additionalResponders) {
+                if (!response.respondersAssigned.includes(responder.id)) {
+                    response.respondersAssigned.push(responder.id);
+                    await this.notifyResponder(responder, response);
+                }
+            }
+
+            this.activeResponses.set(responseId, response);
+
+            // Emit escalation event
+            this.eventBus.emit({
+                type: 'emergency.response.escalated',
+                source: 'guardian-protect',
+                payload: { responseId, escalationLevel: response.escalationLevel },
+                timestamp: new Date(),
+                priority: 'high'
+            });
+
+            logger.warn('Emergency response escalated', {
+                responseId,
+                escalationLevel: response.escalationLevel
+            });
+        } catch (error) {
+            logger.error('Failed to escalate response', { responseId, error });
+            throw error;
+        }
+    }
+
+    public async coordinateResponse(responseId: string, coordination: any): Promise<void> {
+        try {
+            const response = this.activeResponses.get(responseId);
+            if (!response) {
+                throw new Error('Response not found');
+            }
+
+            // Update coordination details
+            response.coordination = coordination;
+            this.activeResponses.set(responseId, response);
+
+            // Notify all responders of coordination update
+            for (const responderId of response.respondersAssigned) {
+                const responder = await this.getResponderInfo(responderId);
+                await this.sendCoordinationUpdate(responder, response, coordination);
+            }
+
+            logger.info('Response coordination updated', { responseId });
+        } catch (error) {
+            logger.error('Failed to coordinate response', { responseId, error });
+            throw error;
+        }
+    }
+
+    public getActiveResponses(): EmergencyResponse[] {
+        return Array.from(this.activeResponses.values())
+            .filter(response => response.status !== 'resolved');
+    }
+
+    public getResponseHistory(): EmergencyResponse[] {
+        // Implementation to fetch response history from database
+        return [];
+    }
+
+    public getResponseTeams(): any[] {
+        return Array.from(this.responseTeams.values());
+    }
+
+    // Helper methods
+    private generateResponseId(): string {
+        return `resp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    private calculateEstimatedResponseTime(data: any): number {
+        // Base response times by type and priority
+        const baseTimes = {
+            fall: { critical: 60, high: 120, medium: 300, low: 600 },
+            medical: { critical: 45, high: 90, medium: 240, low: 480 },
+            fire: { critical: 30, high: 60, medium: 120, low: 240 },
+            security: { critical: 90, high: 180, medium: 360, low: 720 }
+        };
+
+        return baseTimes[data.type]?.[data.priority] || 300;
+    }
+
+    private async getAvailableResponders(type: string, priority: string): Promise<any[]> {
+        // Implementation to get available responders based on type and priority
+        return Array.from(this.responseTeams.values())
+            .filter(responder =>
+                responder.status === 'available' &&
+                responder.capabilities.includes(type)
+            );
+    }
+
+    private getRequiredResponderCount(response: EmergencyResponse): number {
+        const counts = {
+            fall: { critical: 3, high: 2, medium: 1, low: 1 },
+            medical: { critical: 4, high: 3, medium: 2, low: 1 },
+            fire: { critical: 6, high: 4, medium: 3, low: 2 },
+            security: { critical: 4, high: 3, medium: 2, low: 1 }
+        };
+
+        return counts[response.type]?.[response.priority] || 1;
+    }
+
+    private async notifyResponder(responder: any, response: EmergencyResponse): Promise<void> {
+        // Implementation to notify responder (push notification, SMS, etc.)
+        logger.info('Responder notified', {
+            responderId: responder.id,
+            responseId: response.id
+        });
+    }
+
+    private escalatePriority(currentPriority: string): string {
+        const escalation = {
+            low: 'medium',
+            medium: 'high',
+            high: 'critical',
+            critical: 'critical'
+        };
+
+        return escalation[currentPriority] || currentPriority;
+    }
+
+    private async getEscalationResponders(response: EmergencyResponse): Promise<any[]> {
+        // Get additional responders for escalated situations
+        return Array.from(this.responseTeams.values())
+            .filter(responder =>
+                responder.status === 'available' &&
+                responder.role === 'supervisor'
+            );
+    }
+
+    private async getResponderInfo(responderId: string): Promise<any> {
+        return this.responseTeams.get(responderId);
+    }
+
+    private async sendCoordinationUpdate(responder: any, response: EmergencyResponse, coordination: any): Promise<void> {
+        // Implementation to send coordination updates
+    }
+
+    private async getFloorFromRoom(roomId?: string): Promise<number> {
+        // Implementation to get floor number from room ID
+        return 1;
+    }
+
+    private async loadResponseTeams(): Promise<void> {
+        // Implementation to load response team data
+        const mockTeams = [
+            {
+                id: 'resp_001',
+                name: 'John Smith',
+                role: 'nurse',
+                status: 'available',
+                capabilities: ['fall', 'medical'],
+                currentLocation: 'Station A',
+                activeResponses: 0
+            },
+            {
+                id: 'resp_002',
+                name: 'Sarah Johnson',
+                role: 'security',
+                status: 'available',
+                capabilities: ['security', 'fire'],
+                currentLocation: 'Main Desk',
+                activeResponses: 0
+            }
+        ];
+
+        mockTeams.forEach(team => {
+            this.responseTeams.set(team.id, team);
+        });
+    }
+}
+
+// src/guardian-protect/hooks/useFloorPlan.ts
+import { useState, useEffect } from 'react';
+import { FloorPlan, CommonArea } from '../types';
+import { GuardianRoom } from '@eversight/core-foundation/types';
+
+export const useFloorPlan = (selectedFloor: number) => {
+    const [floorPlan, setFloorPlan] = useState<FloorPlan | null>(null);
+    const [rooms, setRooms] = useState<GuardianRoom[]>([]);
+    const [commonAreas, setCommonAreas] = useState<CommonArea[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+
+    useEffect(() => {
+        loadFloorPlan(selectedFloor);
+    }, [selectedFloor]);
+
+    const loadFloorPlan = async (floor: number) => {
+        setIsLoading(true);
+        try {
+            // Mock floor plan data - in real implementation, this would come from API
+            const mockFloorPlan: FloorPlan = {
+                id: `floor_${floor}`,
+                name: floor === 0 ? 'Outdoor Areas' : `Floor ${floor}`,
+                level: floor,
+                rooms: generateRoomsForFloor(floor),
+                commonAreas: generateCommonAreasForFloor(floor),
+                emergencyExits: [],
+                cameraPositions: generateCameraPositions(floor)
+            };
+
+            setFloorPlan(mockFloorPlan);
+            setRooms(mockFloorPlan.rooms);
+            setCommonAreas(mockFloorPlan.commonAreas);
+        } catch (error) {
+            console.error('Failed to load floor plan:', error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const generateRoomsForFloor = (floor: number): GuardianRoom[] => {
+        if (floor === 0) return []; // Outdoor areas have no rooms
+
+        const rooms: GuardianRoom[] = [];
+        const roomStart = floor === 1 ? 101 : 201;
+        const roomEnd = floor === 1 ? 130 : 230;
+
+        for (let i = roomStart; i <= roomEnd; i++) {
+            const roomIndex = i - roomStart;
+            const row = Math.floor(roomIndex / 10);
+            const col = roomIndex % 10;
+
+            rooms.push({
+                id: `room_${i}`,
+                number: i.toString(),
+                floor: floor,
+                type: 'resident_room',
+                capacity: 1,
+                coordinates: {
+                    x: 50 + col * 75,
+                    y: 50 + row * 60,
+                    width: 70,
+                    height: 55
+                },
+                currentOccupants: Math.random() > 0.3 ? [`resident_${i}`] : [],
+                status: 'available',
+                lastCleaned: new Date(),
+                amenities: ['bed', 'bathroom', 'closet']
+            });
+        }
+
+        return rooms;
+    };
+
+    const generateCommonAreasForFloor = (floor: number): CommonArea[] => {
+        if (floor === 0) {
+            return [
+                {
+                    id: 'garden_courtyard',
+                    name: 'Garden Courtyard',
+                    type: 'garden',
+                    floor: 0,
+                    coordinates: { x: 100, y: 100, width: 300, height: 200 },
+                    capacity: 50,
+                    monitoringLevel: 'medium'
+                },
+                {
+                    id: 'outdoor_seating',
+                    name: 'Outdoor Seating',
+                    type: 'garden',
+                    floor: 0,
+                    coordinates: { x: 450, y: 150, width: 200, height: 150 },
+                    capacity: 20,
+                    monitoringLevel: 'low'
+                }
+            ];
+        }
+
+        const commonAreas: CommonArea[] = [
+            {
+                id: `lobby_${floor}`,
+                name: floor === 1 ? 'Main Lobby' : 'Upper Lounge',
+                type: 'lobby',
+                floor: floor,
+                coordinates: { x: 350, y: 50, width: 150, height: 100 },
+                capacity: 30,
+                monitoringLevel: 'high'
+            },
+            {
+                id: `dining_${floor}`,
+                name: floor === 1 ? 'Dining Room' : 'TV Room',
+                type: 'dining',
+                floor: floor,
+                coordinates: { x: 550, y: 50, width: 200, height: 150 },
+                capacity: 40,
+                monitoringLevel: 'high'
+            },
+            {
+                id: `hallway_main_${floor}`,
+                name: 'Main Hallway',
+                type: 'hallway',
+                floor: floor,
+                coordinates: { x: 25, y: 200, width: 750, height: 30 },
+                capacity: 20,
+                monitoringLevel: 'medium'
+            }
+        ];
+
+        if (floor === 1) {
+            commonAreas.push(
+                {
+                    id: 'recreation_room',
+                    name: 'Recreation Room',
+                    type: 'recreation',
+                    floor: 1,
+                    coordinates: { x: 50, y: 400, width: 200, height: 150 },
+                    capacity: 25,
+                    monitoringLevel: 'medium'
+                },
+                {
+                    id: 'library',
+                    name: 'Library',
+                    type: 'library',
+                    floor: 1,
+                    coordinates: { x: 300, y: 400, width: 150, height: 100 },
+                    capacity: 15,
+                    monitoringLevel: 'low'
+                }
+            );
+        } else {
+            commonAreas.push(
+                {
+                    id: 'fitness_center',
+                    name: 'Fitness Center',
+                    type: 'fitness',
+                    floor: 2,
+                    coordinates: { x: 50, y: 400, width: 200, height: 150 },
+                    capacity: 20,
+                    monitoringLevel: 'high'
+                },
+                {
+                    id: 'game_room',
+                    name: 'Game Room',
+                    type: 'recreation',
+                    floor: 2,
+                    coordinates: { x: 300, y: 400, width: 150, height: 100 },
+                    capacity: 15,
+                    monitoringLevel: 'medium'
+                }
+            );
+        }
+
+        return commonAreas;
+    };
+
+    const generateCameraPositions = (floor: number) => {
+        // Generate camera positions for the floor
+        return [];
+    };
+
+    return {
+        floorPlan,
+        rooms,
+        commonAreas,
+        isLoading,
+        refreshFloorPlan: () => loadFloorPlan(selectedFloor)
+    };
+};
