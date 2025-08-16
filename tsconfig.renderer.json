@@ -1,0 +1,16 @@
+{
+    "extends": "./tsconfig.json",
+    "include": [
+        "src/renderer/**/*",
+        "src/guardian-protect/**/*",
+        "src/core-foundation/**/*"
+    ],
+    "exclude": [
+        "src/data-layer/**/*",
+        "src/database/**/*",
+        "src/main/**/*",
+        "src/security/**/*",
+        "node_modules",
+        "dist"
+    ]
+}
