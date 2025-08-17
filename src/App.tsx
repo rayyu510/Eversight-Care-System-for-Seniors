@@ -17,7 +17,7 @@ const App = () => {
         {
             id: 'guardian-protect',
             label: 'Guardian Protect',
-            description: 'AI-powered fall detection & emergency response',
+            // description: 'AI-powered fall detection & emergency response',
             icon: '🛡️',
             status: 'Active',
             metric: '48 Devices Online',
@@ -26,27 +26,27 @@ const App = () => {
         {
             id: 'guardian-insight',
             label: 'Guardian Insight',
-            description: 'AI analytics & health predictions',
+            //   description: 'AI analytics & health predictions',
             icon: '🧠',
-            status: 'Development',
+            status: 'Active',
             metric: '76% Risk Score',
             metricIcon: '📊'
         },
         {
             id: 'guardian-carepro',
             label: 'Guardian CarePro',
-            description: 'Comprehensive care management',
+            //   description: 'Comprehensive care management',
             icon: '🏥',
-            status: 'Development',
+            status: 'Active',
             metric: '89 Staff Members',
             metricIcon: '👥'
         },
         {
             id: 'guardian-caretrack',
             label: 'Guardian CareTrack',
-            description: 'Medication & treatment tracking',
+            //   description: 'Medication & treatment tracking',
             icon: '💊',
-            status: 'Development',
+            status: 'Avtive',
             metric: '92% Compliance',
             metricIcon: '✅'
         }
@@ -175,7 +175,7 @@ const App = () => {
                                         color: 'rgba(255,255,255,0.8)',
                                         lineHeight: '1.2'
                                     }}>
-                                        {module.description}
+
                                     </p>
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '9px' }}>
                                         <span style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
@@ -535,7 +535,7 @@ const App = () => {
                                                 <span style={{ fontSize: '14px', color: '#6b7280' }}>Guardian Modules</span>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                     <span style={{ fontSize: '14px', color: '#10b981' }}>1 Active</span>
-                                                    <span style={{ fontSize: '14px', color: '#f97316' }}>3 Development</span>
+                                                    <span style={{ fontSize: '14px', color: '#f97316' }}>3 </span>
                                                 </div>
                                             </div>
                                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

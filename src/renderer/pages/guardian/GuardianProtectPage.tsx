@@ -10,13 +10,8 @@ export const GuardianProtectPage: React.FC = () => {
                 AI-powered fall detection system with comprehensive floor plan monitoring for rooms 201-210.
                 Advanced video analytics and real-time emergency response coordination.
             </p>
-
-            <div style={{ background: '#dbeafe', padding: '1rem', borderRadius: '6px', marginBottom: '1.5rem' }}>
-                <strong style={{ color: '#1e40af' }}>🏗️ Implementation Ready:</strong> This module will include ~12,000 lines of production code
-            </div>
-
             <div style={{ marginTop: '2rem' }}>
-                <h3 style={{ color: '#1e293b', marginBottom: '1rem' }}>Live Dashboard</h3>
+                <h3 style={{ color: '#1e293b', marginBottom: '1rem' }}> </h3>
                 <GuardianProtectDashboard />
             </div>
 
