@@ -1,2 +1,0 @@
-Node modules can be restored with: npm install
-All dependencies are locked in package-lock.json
