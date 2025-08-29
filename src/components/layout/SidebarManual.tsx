@@ -1,4 +1,5 @@
 import React from 'react';
+import logo from '@assets/logo.png';
 
 interface SidebarManualProps {
     activeModule: string;
@@ -44,7 +45,7 @@ const SidebarManual: React.FC<SidebarManualProps> = ({ activeModule, setActiveMo
                 gap: '8px',
                 cursor: 'pointer'
             }} onClick={() => setActiveModule('home')}>
-                <img src="/assets/logo.png" alt="EverSight Care" style={{ height: '60px', width: 'auto', objectFit: 'contain' }} />
+                <img src={logo} alt="EverSight Care" style={{ height: '60px', width: 'auto', objectFit: 'contain' }} />
             </div>
 
             <div style={{ height: '57px', backgroundColor: 'transparent' }} />
