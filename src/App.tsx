@@ -8,6 +8,7 @@ import Header from './components/layout/AppHeader';
 import { useConfigurationStore } from './store/configurationStore';
 import DashboardConfigurationWizard from './setup/DashboardConfigurationWizard';
 import { DashboardTemplateRenderer } from './components/templates/DashboardTemplateRenderer';
+import logo from '@assets/logo.png';
 
 // Guardian Module Pages
 import { GuardianProtectPage } from './renderer/pages/guardian/GuardianProtectPage';
@@ -58,7 +59,7 @@ const App = () => {
             <div style={{ minHeight: '100vh', backgroundColor: '#f9fafb' }}>
                 {/* Fixed logo in top-left while configuring */}
                 <div style={{ position: 'fixed', left: 0, top: 0, zIndex: 50, padding: '8px 12px', backgroundColor: 'white', borderBottomRightRadius: 10 }}>
-                    <img src="/assets/logo.png" alt="EverSight Care" style={{ height: '48px', width: 'auto', objectFit: 'contain' }} onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                    <img src={logo} alt="EverSight Care" style={{ height: '48px', width: 'auto', objectFit: 'contain' }} onError={(e) => { e.currentTarget.style.display = 'none'; }} />
                 </div>
                 {/* Wizard content takes the full available area */}
                 <div style={{ paddingTop: '72px' }}>
@@ -246,7 +247,7 @@ const App = () => {
                 >
                     {/* Company Logo - 2.5x Bigger */}
                     <img
-                        src="/assets/logo.png"
+                        src={logo}
                         alt="EverSight Care"
                         style={{
                             height: '60px',
